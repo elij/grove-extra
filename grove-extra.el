@@ -285,30 +285,44 @@ Directories come first, then files. Hidden files are excluded."
   (grove--ensure-directory)
   (let ((buf (get-buffer-create "*grove-capture*")))
     (switch-to-buffer buf)
-    (set-auto-mode t)
+    (if (string= (downcase grove-default-extension) "md")
+        (when (fboundp 'markdown-mode) (markdown-mode))
+      (when (fboundp 'org-mode) (org-mode)))
     (grove-capture-mode 1)
     (let ((inhibit-read-only t)) (erase-buffer))
     (insert "Title\n\nContent")
     (goto-char (point-min))
-    (message "Type freely, then press C-c C-c to save or C-c C-k to cancel.")))
+    (setq-local header-line-format
+                (substitute-command-keys
+                 "Capture: \\[grove-capture-finalize] to save, \\[grove-capture-cancel] to discard"))
+    (message (substitute-command-keys "Type your note. First line becomes the title. \\[grove-capture-finalize] to save."))))
 
 (defun grove-extra-capture-finalize ()
   (interactive)
-  (when (eq major-mode 'grove-capture-mode)
-    (let ((content (buffer-string)))
+  (unless (string= (buffer-name) "*grove-capture*")
+    (user-error "Not in the grove capture buffer"))
+  (let ((content (string-trim (buffer-string))))
+    (if (string-empty-p content)
+        (progn
+          (when (fboundp 'grove-capture-cancel) (grove-capture-cancel))
+          (message "Empty note discarded"))
+      
       (let* ((lines (split-string content "\n"))
              (title (string-trim (car lines)))
              (body (string-join (cdr lines) "\n"))
              (filename (concat (grove--sanitize-filename title) "." grove-default-extension))
              (path (grove--unique-path (grove--inbox-path) filename)))
+        
         (with-temp-file path
           (if (string= (file-name-extension path) "md")
               (insert "# " title "\n")
             (insert "#+title: " title "\n"))
           (unless (string-empty-p body)
             (insert "\n" body "\n")))
+        
         (kill-buffer (current-buffer))
-        (message "Saved to %s" path)))))
+        (find-file path)
+        (message "Note saved: %s" (file-name-nondirectory path))))))
 
 (defun grove-extra-daily (&optional time)
   (interactive)
