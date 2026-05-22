@@ -20,6 +20,7 @@
 (defconst grove-graph-fa2--time-step 0.05) 
 (defconst grove-graph-fa2--max-speed 50.0) 
 (defconst grove-graph-fa2--canvas-size 500.0)
+(defconst grove-graph-fa2--event-horizon 240.0)
 
 (defvar grove-graph-fa2--bg-timer nil)
 (defvar grove-graph-fa2--bg-buffer nil)
@@ -137,8 +138,18 @@
           (fa2-set-x n (+ (fa2-x n) (* (fa2-dx n) grove-graph-fa2--time-step)))
           (fa2-set-y n (+ (fa2-y n) (* (fa2-dy n) grove-graph-fa2--time-step)))
           
-          (fa2-set-dx n (* (fa2-dx n) grove-graph-fa2--friction))
-          (fa2-set-dy n (* (fa2-dy n) grove-graph-fa2--friction)))))
+          (let* ((new-dist (sqrt (+ (* (fa2-x n) (fa2-x n)) (* (fa2-y n) (fa2-y n)))))
+                 (horizon grove-graph-fa2--event-horizon)
+                 (horizon-start (* horizon 0.8))
+                 (applied-friction
+                  (cond
+                   ((>= new-dist horizon) 0.0)
+                   ((> new-dist horizon-start)
+                    (* grove-graph-fa2--friction
+                       (exp (- (* 5.0 (/ (- new-dist horizon-start) (- horizon horizon-start)))))))
+                   (t grove-graph-fa2--friction))))
+            (fa2-set-dx n (* (fa2-dx n) applied-friction))
+            (fa2-set-dy n (* (fa2-dy n) applied-friction))))))
 
     ;; PHASE 2: SVG Rendering
     (with-current-buffer grove-graph-fa2--bg-buffer
