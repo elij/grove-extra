@@ -202,6 +202,7 @@ Directories come first, then files. Hidden files are excluded."
                valid-exts " ")))
 
 (defun grove-extra-search--consult-ripgrep (&optional initial)
+  (require 'consult nil t) ;; Ensure variables are loaded before binding
   (let ((consult-ripgrep-args (concat consult-ripgrep-args " " (grove-extra-search--glob-args nil))))
     (consult--grep "Grove search" #'consult--grep-make-builder grove-directory initial)))
 
@@ -212,14 +213,26 @@ Directories come first, then files. Hidden files are excluded."
                   (shell-quote-argument pattern)
                   (shell-quote-argument grove-directory)))))
 
+(defun grove-extra-search (&optional initial)
+  "Override for `grove-search' that properly handles lazy-loaded consult."
+  (interactive)
+  (grove--ensure-directory)
+  (if (or (featurep 'consult) (fboundp 'consult-ripgrep))
+      (progn
+        (require 'consult nil t)
+        (grove-search--consult-ripgrep initial))
+    (grove-search--grep initial)))
+
 (defun grove-extra-search-tag (&optional initial)
   (interactive)
   (grove--ensure-directory)
   (let* ((tag (or initial (read-string "Tag: ")))
          (pattern (format "(#%s\\b|:%s:|tags:.*\\b%s\\b)" (regexp-quote tag) (regexp-quote tag) (regexp-quote tag))))
-    (if (featurep 'consult)
-        (let ((consult-ripgrep-args (concat consult-ripgrep-args " " (grove-extra-search--glob-args nil))))
-          (consult--grep "Grove tags" #'consult--grep-make-builder grove-directory pattern))
+    (if (or (featurep 'consult) (fboundp 'consult-ripgrep))
+        (progn
+          (require 'consult nil t)
+          (let ((consult-ripgrep-args (concat consult-ripgrep-args " " (grove-extra-search--glob-args nil))))
+            (consult--grep "Grove tags" #'consult--grep-make-builder grove-directory pattern)))
       (grep (format "rg --no-heading --line-number %s %s %s"
                     (grove-extra-search--glob-args t)
                     (shell-quote-argument pattern)
@@ -612,5 +625,6 @@ Each result is a plist (:file :line :context) found via ripgrep."
 (advice-add 'grove-backlinks :override #'grove-extra-backlinks)
 (advice-add 'grove-tree--list-entries :override #'grove-extra-tree--list-entries)
 (advice-add 'grove-tree--item-count :override #'grove-extra-tree--item-count)
+(advice-add 'grove-search :override #'grove-extra-search)
 
 (provide 'grove-extra)
