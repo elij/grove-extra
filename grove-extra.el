@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.1.7
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -71,7 +71,7 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
 (setq grove-link--regexp "\\[\\[\\([^]\n|]+\\)\\(?:|[^]\n]+\\|\\]\\[[^]\n]+\\)?\\]\\]")
 
 ;;;; ===========================================================================
-;;;; CORE & MARKDOWN SUPPORT OVERRIDES
+;;;; CORE UTILITIES & PREDICATES
 ;;;; ===========================================================================
 
 (defun grove-extra--make-ci-regexp (str)
@@ -95,102 +95,100 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
             "\\)\\'")))
 
 (defun grove-extra--valid-extension-p (filename)
-  "Return non-nil if FILENAME has an allowed extension (Case Insensitive).
-Automatically handles misconfigured list formats."
+  "Return non-nil if FILENAME has an allowed extension (Case Insensitive)."
   (let ((ext (file-name-extension filename))
         (valid-exts (if (listp grove-file-extensions)
                         grove-file-extensions
                       (list grove-file-extensions))))
     (and ext (member (downcase ext) (mapcar (lambda (s) (downcase (format "%s" s))) valid-exts)))))
 
-(defun grove-extra--parse-note (file)
-  "Parse an org or markdown FILE and return a metadata plist."
-  (let ((mtime (file-attribute-modification-time (file-attributes file)))
-        title tags links)
-    (with-temp-buffer
-      (insert-file-contents file)
-      ;; Extract title (#+title:, YAML title:, or Markdown # Heading)
-      (goto-char (point-min))
-      (when (re-search-forward "^\\(?:#\\+title:\\|title:\\|#\\)\\s-*\\(.+\\)" nil t)
-        (setq title (string-trim (match-string 1) "[ \t\n\r\"]+")))
-      ;; Extract tags (#+filetags: or YAML tags:)
-      (goto-char (point-min))
-      (when (re-search-forward "^\\(?:#\\+filetags:\\|tags:\\)\\s-*\\(.+\\)" nil t)
-        (let ((raw-tags (match-string 1)))
-          (setq raw-tags (replace-regexp-in-string "[\\[\\]\"']" "" raw-tags))
-          (setq tags (split-string raw-tags "[:,]\\s-*" t "\\s-*"))))
-      (setq tags (grove--merge-tags tags (grove--collect-inline-tags)))
-      ;; Extract [[wikilinks]]
-      (goto-char (point-min))
-      (while (re-search-forward grove-link--regexp nil t)
-        (let ((target (match-string-no-properties 1)))
-          (push target links)))
-      (list :title title :tags tags :links (nreverse links) :mtime mtime))))
-
-(defun grove-extra--refresh-cache ()
-  (grove--ensure-directory)
-  (let ((files (directory-files-recursively grove-directory (grove-extra--file-extension-regexp)))
-        (seen (make-hash-table :test #'equal)))
-    (dolist (file files)
-      (puthash file t seen)
-      (let* ((mtime (file-attribute-modification-time (file-attributes file)))
-             (cached (gethash file grove--cache)))
-        (when (or (null cached)
-                  (time-less-p (plist-get cached :mtime) mtime))
-          (puthash file (grove-extra--parse-note file) grove--cache))))
-    (maphash (lambda (file _meta)
-               (unless (gethash file seen)
-                 (remhash file grove--cache)))
-             grove--cache)))
-
-(defun grove-extra-file-p (file)
-  (and grove-directory file
-       (grove-extra--valid-extension-p file)
-       (string-prefix-p (expand-file-name grove-directory) (expand-file-name file))))
-
-(defun grove-extra--turn-on ()
-  (when (and (buffer-file-name) (grove-file-p (buffer-file-name)))
+;; Native Hook Replacement
+(defun grove-extra--turn-on-hook ()
+  "Enable grove-mode if the file belongs to the vault and our mode is active."
+  (when (and grove-extra-mode
+             (buffer-file-name)
+             (grove-file-p (buffer-file-name)))
     (grove-mode 1)))
 
-(defun grove-extra-tree--list-entries (directory depth)
-  "Return a sorted list of `grove-tree-node' structs for DIRECTORY at DEPTH.
-Directories come first, then files. Hidden files are excluded."
-  (let (dirs files)
-    (dolist (file (directory-files directory t))
-      (let ((name (file-name-nondirectory file)))
-        (unless (string-prefix-p "." name)
-          (if (file-directory-p file)
-              (push (make-grove-tree-node
-                     :path file
-                     :name name
-                     :depth depth
-                     :directory-p t
-                     :expanded-p nil)
-                    dirs)
-            (when (grove-extra--valid-extension-p name)
-              (push (make-grove-tree-node
-                     :path file
-                     :name (file-name-sans-extension name)
-                     :depth depth
-                     :directory-p nil
-                     :expanded-p nil)
-                    files))))))
-    (append (sort dirs (lambda (a b)
-                         (string< (grove-tree-node-name a)
-                                  (grove-tree-node-name b))))
-            (sort files (lambda (a b)
-                          (string< (grove-tree-node-name a)
-                                   (grove-tree-node-name b)))))))
+;;;; ===========================================================================
+;;;; AROUND ADVICE WRAPPERS (CORE & PARSING)
+;;;; ===========================================================================
 
-(defun grove-extra-tree--item-count (directory)
-  "Return the number of visible items (allowed files and subdirs) in DIRECTORY."
-  (let ((count 0))
-    (dolist (file (directory-files directory nil))
-      (unless (string-prefix-p "." file)
-        (when (or (file-directory-p (expand-file-name file directory))
-                  (grove-extra--valid-extension-p file))
-          (cl-incf count))))
-    count))
+(defun grove-extra-around-file-p (orig-fun file)
+  (if grove-extra-mode
+      (and grove-directory file
+           (grove-extra--valid-extension-p file)
+           (string-prefix-p (expand-file-name grove-directory) (expand-file-name file)))
+    (funcall orig-fun file)))
+
+(defun grove-extra-around-parse-note (orig-fun file)
+  (if grove-extra-mode
+      (let ((mtime (file-attribute-modification-time (file-attributes file)))
+            title tags links)
+        (with-temp-buffer
+          (insert-file-contents file)
+          ;; Extract title (#+title:, YAML title:, or Markdown # Heading)
+          (goto-char (point-min))
+          (when (re-search-forward "^\\(?:#\\+title:\\|title:\\|#\\)\\s-*\\(.+\\)" nil t)
+            (setq title (string-trim (match-string 1) "[ \t\n\r\"]+")))
+          ;; Extract tags (#+filetags: or YAML tags:)
+          (goto-char (point-min))
+          (when (re-search-forward "^\\(?:#\\+filetags:\\|tags:\\)\\s-*\\(.+\\)" nil t)
+            (let ((raw-tags (match-string 1)))
+              (setq raw-tags (replace-regexp-in-string "[\\[\\]\"']" "" raw-tags))
+              (setq tags (split-string raw-tags "[:,]\\s-*" t "\\s-*"))))
+          (setq tags (grove--merge-tags tags (grove--collect-inline-tags)))
+          ;; Extract [[wikilinks]]
+          (goto-char (point-min))
+          (while (re-search-forward grove-link--regexp nil t)
+            (let ((target (match-string-no-properties 1)))
+              (push target links)))
+          (list :title title :tags tags :links (nreverse links) :mtime mtime)))
+    (funcall orig-fun file)))
+
+(defun grove-extra-around-refresh-cache (orig-fun)
+  (if grove-extra-mode
+      (progn
+        (grove--ensure-directory)
+        (let ((files (directory-files-recursively grove-directory (grove-extra--file-extension-regexp)))
+              (seen (make-hash-table :test #'equal)))
+          (dolist (file files)
+            (puthash file t seen)
+            (let* ((mtime (file-attribute-modification-time (file-attributes file)))
+                   (cached (gethash file grove--cache)))
+              (when (or (null cached)
+                        (time-less-p (plist-get cached :mtime) mtime))
+                (puthash file (grove--parse-note file) grove--cache))))
+          (maphash (lambda (file _meta)
+                     (unless (gethash file seen)
+                       (remhash file grove--cache)))
+                   grove--cache)))
+    (funcall orig-fun)))
+
+(defun grove-extra-around-tree-list-entries (orig-fun directory depth)
+  (if grove-extra-mode
+      (let (dirs files)
+        (dolist (file (directory-files directory t))
+          (let ((name (file-name-nondirectory file)))
+            (unless (string-prefix-p "." name)
+              (if (file-directory-p file)
+                  (push (make-grove-tree-node :path file :name name :depth depth :directory-p t :expanded-p nil) dirs)
+                (when (grove-extra--valid-extension-p name)
+                  (push (make-grove-tree-node :path file :name (file-name-sans-extension name) :depth depth :directory-p nil :expanded-p nil) files))))))
+        (append (sort dirs (lambda (a b) (string< (grove-tree-node-name a) (grove-tree-node-name b))))
+                (sort files (lambda (a b) (string< (grove-tree-node-name a) (grove-tree-node-name b))))))
+    (funcall orig-fun directory depth)))
+
+(defun grove-extra-around-tree-item-count (orig-fun directory)
+  (if grove-extra-mode
+      (let ((count 0))
+        (dolist (file (directory-files directory nil))
+          (unless (string-prefix-p "." file)
+            (when (or (file-directory-p (expand-file-name file directory))
+                      (grove-extra--valid-extension-p file))
+              (cl-incf count))))
+        count)
+    (funcall orig-fun directory)))
 
 ;;;; ===========================================================================
 ;;;; SEARCH & LINKS
@@ -201,175 +199,195 @@ Directories come first, then files. Hidden files are excluded."
     (mapconcat (lambda (ext) (if quote-p (format "--glob='*.%s'" ext) (format "--glob=*.%s" ext)))
                valid-exts " ")))
 
-(defun grove-extra-search--consult-ripgrep (&optional initial)
-  (require 'consult nil t) ;; Ensure variables are loaded before binding
-  (let ((consult-ripgrep-args (concat consult-ripgrep-args " " (grove-extra-search--glob-args nil))))
-    (consult--grep "Grove search" #'consult--grep-make-builder grove-directory initial)))
-
-(defun grove-extra-search--grep (&optional initial)
-  (let ((pattern (read-string "Grove search: " initial)))
-    (grep (format "rg --no-heading --line-number %s %s %s"
-                  (grove-extra-search--glob-args t)
-                  (shell-quote-argument pattern)
-                  (shell-quote-argument grove-directory)))))
-
-(defun grove-extra-search (&optional initial)
-  "Override for `grove-search' that properly handles lazy-loaded consult."
-  (interactive)
-  (grove--ensure-directory)
-  (if (or (featurep 'consult) (fboundp 'consult-ripgrep))
+(defun grove-extra-around-search-consult-ripgrep (orig-fun &optional initial)
+  (if grove-extra-mode
       (progn
         (require 'consult nil t)
-        (grove-search--consult-ripgrep initial))
-    (grove-search--grep initial)))
+        (let ((consult-ripgrep-args (concat consult-ripgrep-args " " (grove-extra-search--glob-args nil))))
+          (consult--grep "Grove search" #'consult--grep-make-builder grove-directory initial)))
+    (funcall orig-fun initial)))
 
-(defun grove-extra-search-tag (&optional initial)
-  (interactive)
-  (grove--ensure-directory)
-  (let* ((tag (or initial (read-string "Tag: ")))
-         (pattern (format "(#%s\\b|:%s:|tags:.*\\b%s\\b)" (regexp-quote tag) (regexp-quote tag) (regexp-quote tag))))
-    (if (or (featurep 'consult) (fboundp 'consult-ripgrep))
-        (progn
-          (require 'consult nil t)
-          (let ((consult-ripgrep-args (concat consult-ripgrep-args " " (grove-extra-search--glob-args nil))))
-            (consult--grep "Grove tags" #'consult--grep-make-builder grove-directory pattern)))
-      (grep (format "rg --no-heading --line-number %s %s %s"
-                    (grove-extra-search--glob-args t)
-                    (shell-quote-argument pattern)
-                    (shell-quote-argument grove-directory))))))
+(defun grove-extra-around-search-grep (orig-fun &optional initial)
+  (if grove-extra-mode
+      (let ((pattern (read-string "Grove search: " initial)))
+        (grep (format "rg --no-heading --line-number %s %s %s"
+                      (grove-extra-search--glob-args t)
+                      (shell-quote-argument pattern)
+                      (shell-quote-argument grove-directory))))
+    (funcall orig-fun initial)))
 
-(defun grove-extra-link-follow (title)
-  (let ((path (grove-link--resolve title)))
-    (if path
-        (find-file path)
-      (if (y-or-n-p (format "Note \"%s\" not found. Create it? " title))
-          (let* ((dir-part (file-name-directory title))
-                 (file-part (file-name-nondirectory title))
-                 (sanitised-file (concat (grove--sanitize-filename file-part) "." grove-default-extension))
-                 (rel-path (if dir-part (concat dir-part sanitised-file) sanitised-file))
-                 (full-path (expand-file-name rel-path grove-directory)))
-            (when dir-part (make-directory (file-name-directory full-path) t))
-            (find-file full-path)
-            (let ((ext (downcase (file-name-extension full-path))))
-              (if (member ext '("md" "markdown"))
-                  (insert "# " file-part "\n\n")
-                (insert "#+title: " file-part "\n\n"))))
-        (message "Link not followed")))))
+(defun grove-extra-around-search (orig-fun &optional initial)
+  (if grove-extra-mode
+      (progn
+        (grove--ensure-directory)
+        (if (or (featurep 'consult) (fboundp 'consult-ripgrep))
+            (progn
+              (require 'consult nil t)
+              (grove-search--consult-ripgrep initial))
+          (grove-search--grep initial)))
+    (funcall orig-fun initial)))
 
-(defun grove-extra-link-insert ()
-  (interactive)
-  (grove--refresh-cache)
-  (let* ((titles (grove--note-titles))
-         (choice (completing-read "Link to: " (mapcar #'car titles) nil nil))
-         (alias (read-string "Alias (optional): ")))
-    (if (string-empty-p alias)
-        (insert "[[" choice "]]")
-      (if (derived-mode-p 'markdown-mode)
-          (insert "[[" choice "|" alias "]]")
-        (insert "[[" choice "][" alias "]]")))))
+(defun grove-extra-around-search-tag (orig-fun &optional initial)
+  (if grove-extra-mode
+      (progn
+        (grove--ensure-directory)
+        (let* ((tag (or initial (read-string "Tag: ")))
+               (pattern (format "(#%s\\b|:%s:|tags:.*\\b%s\\b)" (regexp-quote tag) (regexp-quote tag) (regexp-quote tag))))
+          (if (or (featurep 'consult) (fboundp 'consult-ripgrep))
+              (progn
+                (require 'consult nil t)
+                (let ((consult-ripgrep-args (concat consult-ripgrep-args " " (grove-extra-search--glob-args nil))))
+                  (consult--grep "Grove tags" #'consult--grep-make-builder grove-directory pattern)))
+            (grep (format "rg --no-heading --line-number %s %s %s"
+                          (grove-extra-search--glob-args t)
+                          (shell-quote-argument pattern)
+                          (shell-quote-argument grove-directory))))))
+    (funcall orig-fun initial)))
 
-(defun grove-extra-link--resolve (title)
-  (grove--refresh-cache)
-  (let ((matches
-         (cl-remove-if-not
-          (lambda (pair)
-            (let* ((note-title (car pair))
-                   (full-path (cdr pair))
-                   (rel-path (file-relative-name full-path grove-directory))
-                   (rel-no-ext (file-name-sans-extension rel-path)))
-              (or (string-equal-ignore-case note-title title)
-                  (string-equal-ignore-case rel-no-ext title)
-                  (string-equal-ignore-case rel-path title))))
-          (grove--note-titles))))
-    (cond
-     ((null matches) nil)
-     ((= (length matches) 1) (cdar matches))
-     (t (let ((choice (completing-read "Multiple matches. Choose file: "
-                                       (mapcar (lambda (m) (file-relative-name (cdr m) grove-directory)) matches)
-                                       nil t)))
-          (expand-file-name choice grove-directory))))))
+(defun grove-extra-around-link-follow (orig-fun title)
+  (if grove-extra-mode
+      (let ((path (grove-link--resolve title)))
+        (if path
+            (find-file path)
+          (if (y-or-n-p (format "Note \"%s\" not found. Create it? " title))
+              (let* ((dir-part (file-name-directory title))
+                     (file-part (file-name-nondirectory title))
+                     (sanitised-file (concat (grove--sanitize-filename file-part) "." grove-default-extension))
+                     (rel-path (if dir-part (concat dir-part sanitised-file) sanitised-file))
+                     (full-path (expand-file-name rel-path grove-directory)))
+                (when dir-part (make-directory (file-name-directory full-path) t))
+                (find-file full-path)
+                (let ((ext (downcase (file-name-extension full-path))))
+                  (if (member ext '("md" "markdown"))
+                      (insert "# " file-part "\n\n")
+                    (insert "#+title: " file-part "\n\n"))))
+            (message "Link not followed"))))
+    (funcall orig-fun title)))
+
+(defun grove-extra-around-link-insert (orig-fun)
+  (if grove-extra-mode
+      (progn
+        (grove--refresh-cache)
+        (let* ((titles (grove--note-titles))
+               (choice (completing-read "Link to: " (mapcar #'car titles) nil nil))
+               (alias (read-string "Alias (optional): ")))
+          (if (string-empty-p alias)
+              (insert "[[" choice "]]")
+            (if (derived-mode-p 'markdown-mode)
+                (insert "[[" choice "|" alias "]]")
+              (insert "[[" choice "][" alias "]]")))))
+    (funcall orig-fun)))
+
+(defun grove-extra-around-link-resolve (orig-fun title)
+  (if grove-extra-mode
+      (progn
+        (grove--refresh-cache)
+        (let ((matches
+               (cl-remove-if-not
+                (lambda (pair)
+                  (let* ((note-title (car pair))
+                         (full-path (cdr pair))
+                         (rel-path (file-relative-name full-path grove-directory))
+                         (rel-no-ext (file-name-sans-extension rel-path)))
+                    (or (string-equal-ignore-case note-title title)
+                        (string-equal-ignore-case rel-no-ext title)
+                        (string-equal-ignore-case rel-path title))))
+                (grove--note-titles))))
+          (cond
+           ((null matches) nil)
+           ((= (length matches) 1) (cdar matches))
+           (t (let ((choice (completing-read "Multiple matches. Choose file: "
+                                             (mapcar (lambda (m) (file-relative-name (cdr m) grove-directory)) matches)
+                                             nil t)))
+                (expand-file-name choice grove-directory))))))
+    (funcall orig-fun title)))
 
 ;;;; ===========================================================================
 ;;;; WORKFLOWS (CAPTURE / DAILY / UI)
 ;;;; ===========================================================================
 
-(defun grove-extra-capture ()
-  (interactive)
-  (grove--ensure-directory)
-  (let ((buf (get-buffer-create "*grove-capture*")))
-    (switch-to-buffer buf)
-    (if (string= (downcase grove-default-extension) "md")
-        (when (fboundp 'markdown-mode) (markdown-mode))
-      (when (fboundp 'org-mode) (org-mode)))
-    (grove-capture-mode 1)
-    (let ((inhibit-read-only t)) (erase-buffer))
-    (insert "Title\n\nContent")
-    (goto-char (point-min))
-    (setq-local header-line-format
-                (substitute-command-keys
-                 "Capture: \\[grove-capture-finalize] to save, \\[grove-capture-cancel] to discard"))
-    (message (substitute-command-keys "Type your note. First line becomes the title. \\[grove-capture-finalize] to save."))))
+(defun grove-extra-around-capture (orig-fun)
+  (if grove-extra-mode
+      (progn
+        (grove--ensure-directory)
+        (let ((buf (get-buffer-create "*grove-capture*")))
+          (switch-to-buffer buf)
+          (if (string= (downcase grove-default-extension) "md")
+              (when (fboundp 'markdown-mode) (markdown-mode))
+            (when (fboundp 'org-mode) (org-mode)))
+          (grove-capture-mode 1)
+          (let ((inhibit-read-only t)) (erase-buffer))
+          (insert "Title\n\nContent")
+          (goto-char (point-min))
+          (setq-local header-line-format
+                      (substitute-command-keys
+                       "Capture: \\[grove-capture-finalize] to save, \\[grove-capture-cancel] to discard"))
+          (message (substitute-command-keys "Type your note. First line becomes the title. \\[grove-capture-finalize] to save."))))
+    (funcall orig-fun)))
 
-(defun grove-extra-capture-finalize ()
-  (interactive)
-  (unless (string= (buffer-name) "*grove-capture*")
-    (user-error "Not in the grove capture buffer"))
-  (let ((content (string-trim (buffer-string))))
-    (if (string-empty-p content)
-        (progn
-          (when (fboundp 'grove-capture-cancel) (grove-capture-cancel))
-          (message "Empty note discarded"))
-      
-      (let* ((lines (split-string content "\n"))
-             (title (string-trim (car lines)))
-             (body (string-join (cdr lines) "\n"))
-             (filename (concat (grove--sanitize-filename title) "." grove-default-extension))
-             (path (grove--unique-path (grove--inbox-path) filename)))
-        
-        (with-temp-file path
-          (if (string= (file-name-extension path) "md")
-              (insert "# " title "\n")
-            (insert "#+title: " title "\n"))
-          (unless (string-empty-p body)
-            (insert "\n" body "\n")))
-        
-        (kill-buffer (current-buffer))
-        (find-file path)
-        (message "Note saved: %s" (file-name-nondirectory path))))))
+(defun grove-extra-around-capture-finalize (orig-fun)
+  (if grove-extra-mode
+      (progn
+        (unless (string= (buffer-name) "*grove-capture*")
+          (user-error "Not in the grove capture buffer"))
+        (let ((content (string-trim (buffer-string))))
+          (if (string-empty-p content)
+              (progn
+                (when (fboundp 'grove-capture-cancel) (grove-capture-cancel))
+                (message "Empty note discarded"))
+            (let* ((lines (split-string content "\n"))
+                   (title (string-trim (car lines)))
+                   (body (string-join (cdr lines) "\n"))
+                   (filename (concat (grove--sanitize-filename title) "." grove-default-extension))
+                   (path (grove--unique-path (grove--inbox-path) filename)))
+              (with-temp-file path
+                (if (string= (file-name-extension path) "md")
+                    (insert "# " title "\n")
+                  (insert "#+title: " title "\n"))
+                (unless (string-empty-p body)
+                  (insert "\n" body "\n")))
+              (kill-buffer (current-buffer))
+              (find-file path)
+              (message "Note saved: %s" (file-name-nondirectory path))))))
+    (funcall orig-fun)))
 
-(defun grove-extra-daily (&optional time)
-  (interactive)
-  (grove--ensure-directory)
-  (let* ((time (or time (current-time)))
-         (filename (concat (format-time-string grove-daily-format time) "." grove-default-extension))
-         (path (expand-file-name filename (grove--daily-path)))
-         (new-p (not (file-exists-p path))))
-    (find-file path)
-    (when new-p
-      (if (string= (file-name-extension path) "md")
-          (progn
-            (insert "# " (format-time-string "%A, %B %e, %Y" time) "\n")
-            (insert "date: " (format-time-string "%F" time) "\n\n"))
-        (progn
-          (insert "#+title: " (format-time-string "%A, %B %e, %Y" time) "\n")
-          (insert "#+date: " (format-time-string "%F" time) "\n\n")))
-      (save-buffer))))
+(defun grove-extra-around-daily (orig-fun &optional time)
+  (if grove-extra-mode
+      (progn
+        (grove--ensure-directory)
+        (let* ((t-val (or time (current-time)))
+               (filename (concat (format-time-string grove-daily-format t-val) "." grove-default-extension))
+               (path (expand-file-name filename (grove--daily-path)))
+               (new-p (not (file-exists-p path))))
+          (find-file path)
+          (when new-p
+            (if (string= (file-name-extension path) "md")
+                (progn
+                  (insert "# " (format-time-string "%A, %B %e, %Y" t-val) "\n")
+                  (insert "date: " (format-time-string "%F" t-val) "\n\n"))
+              (progn
+                (insert "#+title: " (format-time-string "%A, %B %e, %Y" t-val) "\n")
+                (insert "#+date: " (format-time-string "%F" t-val) "\n\n")))
+            (save-buffer))))
+    (funcall orig-fun time)))
 
-(defun grove-extra-ui-home ()
-  (let ((daily (expand-file-name (concat (format-time-string grove-daily-format) "." grove-default-extension) (grove--daily-path))))
-    (cond
-     ((file-exists-p daily) (find-file daily))
-     ((> (hash-table-count grove--cache) 0)
-      (let* ((all-files (hash-table-keys grove--cache))
-             (first-file (car all-files)))
-        (find-file first-file)))
-     (t (let ((buf (get-buffer-create "*grove-home*")))
-          (with-current-buffer buf
-            (let ((inhibit-read-only t))
-              (erase-buffer)
-              (insert "Welcome to Grove.\n\nYour vault is empty.\n")
-              (insert "Press 'c' to capture a new note, or 'd' for today's note.")))
-          (switch-to-buffer buf))))))
+(defun grove-extra-around-ui-home (orig-fun)
+  (if grove-extra-mode
+      (let ((daily (expand-file-name (concat (format-time-string grove-daily-format) "." grove-default-extension) (grove--daily-path))))
+        (cond
+         ((file-exists-p daily) (find-file daily))
+         ((> (hash-table-count grove--cache) 0)
+          (let* ((all-files (hash-table-keys grove--cache))
+                 (first-file (car all-files)))
+            (find-file first-file)))
+         (t (let ((buf (get-buffer-create "*grove-home*")))
+              (with-current-buffer buf
+                (let ((inhibit-read-only t))
+                  (erase-buffer)
+                  (insert "Welcome to Grove.\n\nYour vault is empty.\n")
+                  (insert "Press 'c' to capture a new note, or 'd' for today's note.")))
+              (switch-to-buffer buf)))))
+    (funcall orig-fun)))
 
 ;;;; ===========================================================================
 ;;;; BACKLINKS 
@@ -377,76 +395,78 @@ Directories come first, then files. Hidden files are excluded."
 
 (defvar grove-backlink-ripgrep-executable "rg")
 
-(defun grove-extra-backlink--find (title &optional filename)
-  "Return a list of backlink results for TITLE or FILENAME.
-Each result is a plist (:file :line :context) found via ripgrep."
-  (grove--ensure-directory)
-  (unless (executable-find grove-backlink-ripgrep-executable)
-    (user-error "Ripgrep not found. Install `%s` and ensure it is on your PATH"
-                grove-backlink-ripgrep-executable))
-  
-  ;; Auto-resolve filename if not provided by caller
-  (unless filename
-    (maphash (lambda (path meta)
-               (when (string-equal-ignore-case (plist-get meta :title) title)
-                 (setq filename (file-name-sans-extension (file-name-nondirectory path)))))
-             grove--cache))
-  (unless filename (setq filename title))
-  
-  (let* ((title-pat (regexp-quote title))
-         (file-pat (regexp-quote filename))
-         (pattern (if (string= title-pat file-pat)
-                      (format "\\[\\[(?:[^]]*/)?%s\\]\\]" title-pat)
-                    (format "\\[\\[(?:[^]]*/)?(?:%s|%s)\\]\\]" title-pat file-pat)))
-         (valid-exts (if (listp grove-file-extensions) grove-file-extensions (list grove-file-extensions)))
-         (globs (mapcar (lambda (ext) (format "--glob=*.%s" ext)) valid-exts))
-         (args (append (list "--no-heading" "--line-number" "--context" "1")
-                       globs (list pattern grove-directory)))
-         (ext-re (mapconcat #'grove-extra--make-ci-regexp valid-exts "\\|"))
-         results current-file)
-    
-    (with-temp-buffer
-      (let ((exit-code (apply #'process-file grove-backlink-ripgrep-executable nil t nil args)))
-        (unless (member exit-code '(0 1 2))
-          (user-error "Ripgrep failed with exit code %s" exit-code)))
-      (goto-char (point-min))
-      (dolist (line (split-string (buffer-string) "\n" t))
-        (cond
-         ((string-match-p "^--$" line))
-         ((string-match (format "^\\(.+\\.\\(?:%s\\)\\):\\([0-9]+\\):\\(.*\\)$" ext-re) line)
-          (let ((file (match-string 1 line))
-                (lnum (string-to-number (match-string 2 line)))
-                (context (string-trim (match-string 3 line))))
-            (unless (and current-file (string= file current-file))
-              (push (list :file file :line lnum :context context) results)))))))
-    
-    (setq current-file (buffer-file-name))
-    (cl-remove-if
-     (lambda (r)
-       (and current-file (string= (plist-get r :file) current-file)))
-     (nreverse results))))
+(defun grove-extra-around-backlink-find (orig-fun title &optional filename)
+  (if grove-extra-mode
+      (progn
+        (grove--ensure-directory)
+        (unless (executable-find grove-backlink-ripgrep-executable)
+          (user-error "Ripgrep not found. Install `%s` and ensure it is on your PATH"
+                      grove-backlink-ripgrep-executable))
+        
+        ;; Auto-resolve filename if not provided by caller
+        (unless filename
+          (maphash (lambda (path meta)
+                     (when (string-equal-ignore-case (plist-get meta :title) title)
+                       (setq filename (file-name-sans-extension (file-name-nondirectory path)))))
+                   grove--cache))
+        (unless filename (setq filename title))
+        
+        (let* ((title-pat (regexp-quote title))
+               (file-pat (regexp-quote filename))
+               (pattern (if (string= title-pat file-pat)
+                            (format "\\[\\[(?:[^]]*/)?%s\\]\\]" title-pat)
+                          (format "\\[\\[(?:[^]]*/)?(?:%s|%s)\\]\\]" title-pat file-pat)))
+               (valid-exts (if (listp grove-file-extensions) grove-file-extensions (list grove-file-extensions)))
+               (globs (mapcar (lambda (ext) (format "--glob=*.%s" ext)) valid-exts))
+               (args (append (list "--no-heading" "--line-number" "--context" "1")
+                             globs (list pattern grove-directory)))
+               (ext-re (mapconcat #'grove-extra--make-ci-regexp valid-exts "\\|"))
+               results current-file)
+          
+          (with-temp-buffer
+            (let ((exit-code (apply #'process-file grove-backlink-ripgrep-executable nil t nil args)))
+              (unless (member exit-code '(0 1 2))
+                (user-error "Ripgrep failed with exit code %s" exit-code)))
+            (goto-char (point-min))
+            (dolist (line (split-string (buffer-string) "\n" t))
+              (cond
+               ((string-match-p "^--$" line))
+               ((string-match (format "^\\(.+\\.\\(?:%s\\)\\):\\([0-9]+\\):\\(.*\\)$" ext-re) line)
+                (let ((file (match-string 1 line))
+                      (lnum (string-to-number (match-string 2 line)))
+                      (context (string-trim (match-string 3 line))))
+                  (unless (and current-file (string= file current-file))
+                    (push (list :file file :line lnum :context context) results)))))))
+          
+          (setq current-file (buffer-file-name))
+          (cl-remove-if
+           (lambda (r)
+             (and current-file (string= (plist-get r :file) current-file)))
+           (nreverse results))))
+    (funcall orig-fun title filename)))
 
-(defun grove-extra-backlinks ()
-  "Show backlinks for the current note."
-  (interactive)
-  (unless (and (buffer-file-name) (grove-file-p (buffer-file-name)))
-    (user-error "Not visiting a grove note"))
-  (grove--refresh-cache)
-  (let* ((meta (gethash (buffer-file-name) grove--cache))
-         (filename (file-name-sans-extension (file-name-nondirectory (buffer-file-name))))
-         (title (or (plist-get meta :title) filename))
-         (results (grove-backlink--find title filename))
-         (buf (if (fboundp 'grove-backlink--render)
-                  (grove-backlink--render title results)
-                (user-error "grove-backlink--render not found. Check installation."))))
-    (display-buffer-in-side-window
-     buf
-     '((side . bottom)
-       (slot . 0)
-       (window-height . 12)
-       (window-parameters
-        . ((no-delete-other-windows . t)))))
-    (message "Found %d backlink(s)" (length results))))
+(defun grove-extra-around-backlinks (orig-fun)
+  (if grove-extra-mode
+      (progn
+        (unless (and (buffer-file-name) (grove-file-p (buffer-file-name)))
+          (user-error "Not visiting a grove note"))
+        (grove--refresh-cache)
+        (let* ((meta (gethash (buffer-file-name) grove--cache))
+               (filename (file-name-sans-extension (file-name-nondirectory (buffer-file-name))))
+               (title (or (plist-get meta :title) filename))
+               (results (grove-backlink--find title filename))
+               (buf (if (fboundp 'grove-backlink--render)
+                        (grove-backlink--render title results)
+                      (user-error "grove-backlink--render not found. Check installation."))))
+          (display-buffer-in-side-window
+           buf
+           '((side . bottom)
+             (slot . 0)
+             (window-height . 12)
+             (window-parameters
+              . ((no-delete-other-windows . t)))))
+          (message "Found %d backlink(s)" (length results))))
+    (funcall orig-fun)))
 
 ;;;; ===========================================================================
 ;;;; GRAPH ENGINE ENHANCEMENTS & ANIMATION PLAYBACK
@@ -507,8 +527,6 @@ Each result is a plist (:file :line :context) found via ripgrep."
                   (cl-incf grove-graph--current-frame))
               (grove-graph--smil-stop))))))))
 
-;; Graph UI & Zoom Mapping Hooks
-(add-hook 'grove-graph-mode-hook #'grove-extra-graph-mode-setup)
 (defun grove-extra-graph-mode-setup ()
   (setq-local cursor-type nil)
   (setq-local bidi-display-reordering nil)
@@ -542,89 +560,132 @@ Each result is a plist (:file :line :context) found via ripgrep."
   (setq grove-graph--scale (if (eq grove-graph-renderer 'fa2) 1.0 grove-graph-default-zoom))
   (grove-graph--update-display))
 
-(defun grove-extra-graph--adjacency-list ()
-  (grove--ensure-directory)
-  (grove--refresh-cache)
-  (let ((adjacency (make-hash-table :test #'equal))
-        (all-titles (make-hash-table :test #'equal))
-        (resolution-map (make-hash-table :test #'equal)))
-    (maphash (lambda (path meta)
-               (let* ((title (plist-get meta :title))
-                      (rel-path (file-relative-name path grove-directory))
-                      (rel-no-ext (file-name-sans-extension rel-path))
-                      (filename-no-ext (file-name-sans-extension (file-name-nondirectory path))))
-                 (puthash title t all-titles)
-                 (puthash (downcase title) title resolution-map)
-                 (puthash (downcase rel-path) title resolution-map)
-                 (puthash (downcase rel-no-ext) title resolution-map)
-                 (puthash (downcase filename-no-ext) title resolution-map)))
-             grove--cache)
-    (maphash (lambda (_path meta)
-               (let ((source (plist-get meta :title))
-                     (links (plist-get meta :links)))
-                 (dolist (raw-target links)
-                   (let ((resolved-target (gethash (downcase raw-target) resolution-map)))
-                     (when (and resolved-target (gethash resolved-target all-titles))
-                       (push resolved-target (gethash source adjacency)))))))
-             grove--cache)
-    (let (result)
-      (maphash (lambda (title _) (push (cons title (gethash title adjacency)) result)) all-titles)
-      result)))
+(defun grove-extra-around-graph-adjacency-list (orig-fun)
+  (if grove-extra-mode
+      (progn
+        (grove--ensure-directory)
+        (grove--refresh-cache)
+        (let ((adjacency (make-hash-table :test #'equal))
+              (all-titles (make-hash-table :test #'equal))
+              (resolution-map (make-hash-table :test #'equal)))
+          (maphash (lambda (path meta)
+                     (let* ((title (plist-get meta :title))
+                            (rel-path (file-relative-name path grove-directory))
+                            (rel-no-ext (file-name-sans-extension rel-path))
+                            (filename-no-ext (file-name-sans-extension (file-name-nondirectory path))))
+                       (puthash title t all-titles)
+                       (puthash (downcase title) title resolution-map)
+                       (puthash (downcase rel-path) title resolution-map)
+                       (puthash (downcase rel-no-ext) title resolution-map)
+                       (puthash (downcase filename-no-ext) title resolution-map)))
+                   grove--cache)
+          (maphash (lambda (_path meta)
+                     (let ((source (plist-get meta :title))
+                           (links (plist-get meta :links)))
+                       (dolist (raw-target links)
+                         (let ((resolved-target (gethash (downcase raw-target) resolution-map)))
+                           (when (and resolved-target (gethash resolved-target all-titles))
+                             (push resolved-target (gethash source adjacency)))))))
+                   grove--cache)
+          (let (result)
+            (maphash (lambda (title _) (push (cons title (gethash title adjacency)) result)) all-titles)
+            result)))
+    (funcall orig-fun)))
 
-(defun grove-extra-graph ()
-  (interactive)
-  (grove--ensure-directory)
-  (message "Building graph...")
-  (let* ((adjacency (grove-extra-graph--adjacency-list))
-         (buf (get-buffer-create "*grove-graph*")))
-    (with-current-buffer buf
-      (grove-graph-mode)
-      (when (fboundp 'grove-graph--smil-stop) (grove-graph--smil-stop))
-      (setq-local grove-graph--scale (if (eq grove-graph-renderer 'fa2) 1.0 grove-graph-default-zoom))
-      (let ((inhibit-read-only t)) (erase-buffer)))
-    
-    (if (fboundp 'grove-graph--display)
-        (grove-graph--display buf)
-      (switch-to-buffer buf))
-    
-    (if (eq grove-graph-renderer 'fa2)
-        (grove-graph-fa2-start buf adjacency)
-      (let* ((markup (if (eq grove-graph-renderer 'mmdr)
-                         (grove-graph--generate-mermaid adjacency)
-                       (grove-graph--generate-dot adjacency)))
-             (svg (if (eq grove-graph-renderer 'mmdr)
-                      (grove-graph--render-mmdr-svg markup)
-                    (grove-graph--render-svg markup))))
-        (with-current-buffer buf
-          (setq-local grove-graph--raw-svg svg)
-          (grove-graph--update-display))
-        (message "Graph: %d notes, %d links" (length adjacency)
-                 (cl-reduce #'+ (mapcar (lambda (e) (length (cdr e))) adjacency)))))))
+(defun grove-extra-around-graph (orig-fun)
+  (if grove-extra-mode
+      (progn
+        (grove--ensure-directory)
+        (message "Building graph...")
+        (let* ((adjacency (grove-graph--adjacency-list))
+               (buf (get-buffer-create "*grove-graph*")))
+          (with-current-buffer buf
+            (grove-graph-mode)
+            (when (fboundp 'grove-graph--smil-stop) (grove-graph--smil-stop))
+            (setq-local grove-graph--scale (if (eq grove-graph-renderer 'fa2) 1.0 grove-graph-default-zoom))
+            (let ((inhibit-read-only t)) (erase-buffer)))
+          
+          (if (fboundp 'grove-graph--display)
+              (grove-graph--display buf)
+            (switch-to-buffer buf))
+          
+          (if (eq grove-graph-renderer 'fa2)
+              (grove-graph-fa2-start buf adjacency)
+            (let* ((markup (if (eq grove-graph-renderer 'mmdr)
+                               (grove-graph--generate-mermaid adjacency)
+                             (grove-graph--generate-dot adjacency)))
+                   (svg (if (eq grove-graph-renderer 'mmdr)
+                            (grove-graph--render-mmdr-svg markup)
+                          (grove-graph--render-svg markup))))
+              (with-current-buffer buf
+                (setq-local grove-graph--raw-svg svg)
+                (grove-graph--update-display))
+              (message "Graph: %d notes, %d links" (length adjacency)
+                       (cl-reduce #'+ (mapcar (lambda (e) (length (cdr e))) adjacency)))))))
+    (funcall orig-fun)))
 
 ;;;; ===========================================================================
-;;;; APPLY EXPLICIT ADVICE 
+;;;; MINOR MODE DEFINITION
 ;;;; ===========================================================================
 
-(advice-add 'grove--parse-note :override #'grove-extra--parse-note)
-(advice-add 'grove--refresh-cache :override #'grove-extra--refresh-cache)
-(advice-add 'grove-file-p :override #'grove-extra-file-p)
-(advice-add 'grove--turn-on :override #'grove-extra--turn-on)
-(advice-add 'grove-search--consult-ripgrep :override #'grove-extra-search--consult-ripgrep)
-(advice-add 'grove-search--grep :override #'grove-extra-search--grep)
-(advice-add 'grove-search-tag :override #'grove-extra-search-tag)
-(advice-add 'grove-link-follow :override #'grove-extra-link-follow)
-(advice-add 'grove-link-insert :override #'grove-extra-link-insert)
-(advice-add 'grove-link--resolve :override #'grove-extra-link--resolve)
-(advice-add 'grove-capture :override #'grove-extra-capture)
-(advice-add 'grove-capture-finalize :override #'grove-extra-capture-finalize)
-(advice-add 'grove-daily :override #'grove-extra-daily)
-(advice-add 'grove-ui-home :override #'grove-extra-ui-home)
-(advice-add 'grove-graph--adjacency-list :override #'grove-extra-graph--adjacency-list)
-(advice-add 'grove-graph :override #'grove-extra-graph)
-(advice-add 'grove-backlink--find :override #'grove-extra-backlink--find)
-(advice-add 'grove-backlinks :override #'grove-extra-backlinks)
-(advice-add 'grove-tree--list-entries :override #'grove-extra-tree--list-entries)
-(advice-add 'grove-tree--item-count :override #'grove-extra-tree--item-count)
-(advice-add 'grove-search :override #'grove-extra-search)
+;;;###autoload
+(define-minor-mode grove-extra-mode
+  "Global minor mode providing Markdown, FA2, and advanced search tools for Grove."
+  :global t
+  :group 'grove-extra
+  (if grove-extra-mode
+      (progn
+        ;; Apply Setup Hooks
+        (add-hook 'find-file-hook #'grove-extra--turn-on-hook)
+        (add-hook 'grove-graph-mode-hook #'grove-extra-graph-mode-setup)
+        
+        ;; Apply Non-Destructive Advice
+        (advice-add 'grove--parse-note :around #'grove-extra-around-parse-note)
+        (advice-add 'grove--refresh-cache :around #'grove-extra-around-refresh-cache)
+        (advice-add 'grove-file-p :around #'grove-extra-around-file-p)
+        (advice-add 'grove-search--consult-ripgrep :around #'grove-extra-around-search-consult-ripgrep)
+        (advice-add 'grove-search--grep :around #'grove-extra-around-search-grep)
+        (advice-add 'grove-search-tag :around #'grove-extra-around-search-tag)
+        (advice-add 'grove-link-follow :around #'grove-extra-around-link-follow)
+        (advice-add 'grove-link-insert :around #'grove-extra-around-link-insert)
+        (advice-add 'grove-link--resolve :around #'grove-extra-around-link-resolve)
+        (advice-add 'grove-capture :around #'grove-extra-around-capture)
+        (advice-add 'grove-capture-finalize :around #'grove-extra-around-capture-finalize)
+        (advice-add 'grove-daily :around #'grove-extra-around-daily)
+        (advice-add 'grove-ui-home :around #'grove-extra-around-ui-home)
+        (advice-add 'grove-graph--adjacency-list :around #'grove-extra-around-graph-adjacency-list)
+        (advice-add 'grove-graph :around #'grove-extra-around-graph)
+        (advice-add 'grove-backlink--find :around #'grove-extra-around-backlink-find)
+        (advice-add 'grove-backlinks :around #'grove-extra-around-backlinks)
+        (advice-add 'grove-tree--list-entries :around #'grove-extra-around-tree-list-entries)
+        (advice-add 'grove-tree--item-count :around #'grove-extra-around-tree-item-count)
+        (advice-add 'grove-search :around #'grove-extra-around-search))
+    (progn
+      ;; Teardown Hooks
+      (remove-hook 'find-file-hook #'grove-extra--turn-on-hook)
+      (remove-hook 'grove-graph-mode-hook #'grove-extra-graph-mode-setup)
+      
+      ;; Teardown Advice
+      (advice-remove 'grove--parse-note #'grove-extra-around-parse-note)
+      (advice-remove 'grove--refresh-cache #'grove-extra-around-refresh-cache)
+      (advice-remove 'grove-file-p #'grove-extra-around-file-p)
+      (advice-remove 'grove-search--consult-ripgrep #'grove-extra-around-search-consult-ripgrep)
+      (advice-remove 'grove-search--grep #'grove-extra-around-search-grep)
+      (advice-remove 'grove-search-tag #'grove-extra-around-search-tag)
+      (advice-remove 'grove-link-follow #'grove-extra-around-link-follow)
+      (advice-remove 'grove-link-insert #'grove-extra-around-link-insert)
+      (advice-remove 'grove-link--resolve #'grove-extra-around-link-resolve)
+      (advice-remove 'grove-capture #'grove-extra-around-capture)
+      (advice-remove 'grove-capture-finalize #'grove-extra-around-capture-finalize)
+      (advice-remove 'grove-daily #'grove-extra-around-daily)
+      (advice-remove 'grove-ui-home #'grove-extra-around-ui-home)
+      (advice-remove 'grove-graph--adjacency-list #'grove-extra-around-graph-adjacency-list)
+      (advice-remove 'grove-graph #'grove-extra-around-graph)
+      (advice-remove 'grove-backlink--find #'grove-extra-around-backlink-find)
+      (advice-remove 'grove-backlinks #'grove-extra-around-backlinks)
+      (advice-remove 'grove-tree--list-entries #'grove-extra-around-tree-list-entries)
+      (advice-remove 'grove-tree--item-count #'grove-extra-around-tree-item-count)
+      (advice-remove 'grove-search #'grove-extra-around-search))))
 
 (provide 'grove-extra)
+;;; grove-extra.el ends here
