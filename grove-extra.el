@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.2.0
+;; Version: 0.2.1
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -102,7 +102,6 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
                       (list grove-file-extensions))))
     (and ext (member (downcase ext) (mapcar (lambda (s) (downcase (format "%s" s))) valid-exts)))))
 
-;; Native Hook Replacement
 (defun grove-extra--turn-on-hook ()
   "Enable grove-mode if the file belongs to the vault and our mode is active."
   (when (and grove-extra-mode
@@ -111,7 +110,76 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
     (grove-mode 1)))
 
 ;;;; ===========================================================================
-;;;; AROUND ADVICE WRAPPERS (CORE & PARSING)
+;;;; BUFFER-LOCAL MINOR MODES (UI & STATE)
+;;;; ===========================================================================
+
+;;; --- Graph Extension Mode ---
+
+(defvar grove-extra-graph-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "+") #'grove-graph-zoom-in)
+    (define-key map (kbd "-") #'grove-graph-zoom-out)
+    (define-key map (kbd "0") #'grove-graph-zoom-reset)
+    (define-key map (kbd "<wheel-up>") #'grove-graph-zoom-in)
+    (define-key map (kbd "<wheel-down>") #'grove-graph-zoom-out)
+    map)
+  "Keymap overriding `grove-graph-mode-map` with zooming tools.")
+
+(defun grove-extra--graph-cleanup ()
+  "Clean up playback buffers and timers when the graph is closed."
+  (when (buffer-live-p grove-graph--playback-buffer)
+    (kill-buffer grove-graph--playback-buffer))
+  (when (fboundp 'grove-graph--smil-stop)
+    (grove-graph--smil-stop)))
+
+(define-minor-mode grove-extra-graph-mode
+  "Buffer-local minor mode for Grove Graph UI enhancements."
+  :init-value nil
+  :lighter " Graph+"
+  :keymap grove-extra-graph-mode-map
+  (if grove-extra-graph-mode
+      (progn
+        (setq-local cursor-type nil)
+        (setq-local bidi-display-reordering nil)
+        (setq-local grove-extra--face-cookie 
+                    (face-remap-add-relative 'default :background grove-graph-bg-color))
+        (add-hook 'kill-buffer-hook #'grove-extra--graph-cleanup nil t)
+        (add-hook 'window-size-change-functions #'grove-graph--update-display nil t))
+    (progn
+      (kill-local-variable 'cursor-type)
+      (kill-local-variable 'bidi-display-reordering)
+      (when (boundp 'grove-extra--face-cookie)
+        (face-remap-remove-relative grove-extra--face-cookie))
+      (remove-hook 'kill-buffer-hook #'grove-extra--graph-cleanup t)
+      (remove-hook 'window-size-change-functions #'grove-graph--update-display t))))
+
+(defun grove-extra--enable-graph-mode ()
+  "Turn on the extra graph features if the global mode is active."
+  (when grove-extra-mode (grove-extra-graph-mode 1)))
+
+;;; --- Capture Extension Mode ---
+
+(define-minor-mode grove-extra-capture-mode
+  "Buffer-local minor mode for Grove Capture enhancements."
+  :init-value nil
+  :lighter " Cap+"
+  (if grove-extra-capture-mode
+      (progn
+        (if (string= (downcase grove-default-extension) "md")
+            (when (fboundp 'markdown-mode) (markdown-mode))
+          (when (fboundp 'org-mode) (org-mode)))
+        (setq-local header-line-format
+                    (substitute-command-keys
+                     "Capture: \\[grove-capture-finalize] to save, \\[grove-capture-cancel] to discard")))
+    (progn
+      (kill-local-variable 'header-line-format))))
+
+(defun grove-extra--enable-capture-mode ()
+  "Turn on the extra capture features if the global mode is active."
+  (when grove-extra-mode (grove-extra-capture-mode 1)))
+
+;;;; ===========================================================================
+;;;; AROUND ADVICE WRAPPERS (CORE LOGIC)
 ;;;; ===========================================================================
 
 (defun grove-extra-around-file-p (orig-fun file)
@@ -127,18 +195,15 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
             title tags links)
         (with-temp-buffer
           (insert-file-contents file)
-          ;; Extract title (#+title:, YAML title:, or Markdown # Heading)
           (goto-char (point-min))
           (when (re-search-forward "^\\(?:#\\+title:\\|title:\\|#\\)\\s-*\\(.+\\)" nil t)
             (setq title (string-trim (match-string 1) "[ \t\n\r\"]+")))
-          ;; Extract tags (#+filetags: or YAML tags:)
           (goto-char (point-min))
           (when (re-search-forward "^\\(?:#\\+filetags:\\|tags:\\)\\s-*\\(.+\\)" nil t)
             (let ((raw-tags (match-string 1)))
               (setq raw-tags (replace-regexp-in-string "[\\[\\]\"']" "" raw-tags))
               (setq tags (split-string raw-tags "[:,]\\s-*" t "\\s-*"))))
           (setq tags (grove--merge-tags tags (grove--collect-inline-tags)))
-          ;; Extract [[wikilinks]]
           (goto-char (point-min))
           (while (re-search-forward grove-link--regexp nil t)
             (let ((target (match-string-no-properties 1)))
@@ -156,13 +221,9 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
             (puthash file t seen)
             (let* ((mtime (file-attribute-modification-time (file-attributes file)))
                    (cached (gethash file grove--cache)))
-              (when (or (null cached)
-                        (time-less-p (plist-get cached :mtime) mtime))
+              (when (or (null cached) (time-less-p (plist-get cached :mtime) mtime))
                 (puthash file (grove--parse-note file) grove--cache))))
-          (maphash (lambda (file _meta)
-                     (unless (gethash file seen)
-                       (remhash file grove--cache)))
-                   grove--cache)))
+          (maphash (lambda (file _meta) (unless (gethash file seen) (remhash file grove--cache))) grove--cache)))
     (funcall orig-fun)))
 
 (defun grove-extra-around-tree-list-entries (orig-fun directory depth)
@@ -184,15 +245,10 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
       (let ((count 0))
         (dolist (file (directory-files directory nil))
           (unless (string-prefix-p "." file)
-            (when (or (file-directory-p (expand-file-name file directory))
-                      (grove-extra--valid-extension-p file))
+            (when (or (file-directory-p (expand-file-name file directory)) (grove-extra--valid-extension-p file))
               (cl-incf count))))
         count)
     (funcall orig-fun directory)))
-
-;;;; ===========================================================================
-;;;; SEARCH & LINKS
-;;;; ===========================================================================
 
 (defun grove-extra-search--glob-args (quote-p)
   (let ((valid-exts (if (listp grove-file-extensions) grove-file-extensions (list grove-file-extensions))))
@@ -221,9 +277,7 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
       (progn
         (grove--ensure-directory)
         (if (or (featurep 'consult) (fboundp 'consult-ripgrep))
-            (progn
-              (require 'consult nil t)
-              (grove-search--consult-ripgrep initial))
+            (progn (require 'consult nil t) (grove-search--consult-ripgrep initial))
           (grove-search--grep initial)))
     (funcall orig-fun initial)))
 
@@ -302,26 +356,16 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
                 (expand-file-name choice grove-directory))))))
     (funcall orig-fun title)))
 
-;;;; ===========================================================================
-;;;; WORKFLOWS (CAPTURE / DAILY / UI)
-;;;; ===========================================================================
-
 (defun grove-extra-around-capture (orig-fun)
   (if grove-extra-mode
       (progn
         (grove--ensure-directory)
         (let ((buf (get-buffer-create "*grove-capture*")))
           (switch-to-buffer buf)
-          (if (string= (downcase grove-default-extension) "md")
-              (when (fboundp 'markdown-mode) (markdown-mode))
-            (when (fboundp 'org-mode) (org-mode)))
           (grove-capture-mode 1)
           (let ((inhibit-read-only t)) (erase-buffer))
           (insert "Title\n\nContent")
           (goto-char (point-min))
-          (setq-local header-line-format
-                      (substitute-command-keys
-                       "Capture: \\[grove-capture-finalize] to save, \\[grove-capture-cancel] to discard"))
           (message (substitute-command-keys "Type your note. First line becomes the title. \\[grove-capture-finalize] to save."))))
     (funcall orig-fun)))
 
@@ -389,12 +433,6 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
               (switch-to-buffer buf)))))
     (funcall orig-fun)))
 
-;;;; ===========================================================================
-;;;; BACKLINKS 
-;;;; ===========================================================================
-
-(defvar grove-backlink-ripgrep-executable "rg")
-
 (defun grove-extra-around-backlink-find (orig-fun title &optional filename)
   (if grove-extra-mode
       (progn
@@ -402,8 +440,6 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
         (unless (executable-find grove-backlink-ripgrep-executable)
           (user-error "Ripgrep not found. Install `%s` and ensure it is on your PATH"
                       grove-backlink-ripgrep-executable))
-        
-        ;; Auto-resolve filename if not provided by caller
         (unless filename
           (maphash (lambda (path meta)
                      (when (string-equal-ignore-case (plist-get meta :title) title)
@@ -437,12 +473,8 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
                       (context (string-trim (match-string 3 line))))
                   (unless (and current-file (string= file current-file))
                     (push (list :file file :line lnum :context context) results)))))))
-          
           (setq current-file (buffer-file-name))
-          (cl-remove-if
-           (lambda (r)
-             (and current-file (string= (plist-get r :file) current-file)))
-           (nreverse results))))
+          (cl-remove-if (lambda (r) (and current-file (string= (plist-get r :file) current-file))) (nreverse results))))
     (funcall orig-fun title filename)))
 
 (defun grove-extra-around-backlinks (orig-fun)
@@ -463,102 +495,9 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
            '((side . bottom)
              (slot . 0)
              (window-height . 12)
-             (window-parameters
-              . ((no-delete-other-windows . t)))))
+             (window-parameters . ((no-delete-other-windows . t)))))
           (message "Found %d backlink(s)" (length results))))
     (funcall orig-fun)))
-
-;;;; ===========================================================================
-;;;; GRAPH ENGINE ENHANCEMENTS & ANIMATION PLAYBACK
-;;;; ===========================================================================
-
-(defun grove-graph--adjust-svg-dimensions (svg-string width height)
-  (if (string-match "<svg\\([^>]*?\\)>" svg-string)
-      (let* ((attrs (match-string 1 svg-string))
-             (clean-attrs (replace-regexp-in-string "[ \t\n\r]*\\(?:width\\|height\\)=\"[^\"]*\"" "" attrs)))
-        (replace-match (format "<svg width=\"%d\" height=\"%d\" preserveAspectRatio=\"xMidYMid meet\"%s>" width height clean-attrs) t t svg-string))
-    svg-string))
-
-(defun grove-graph--update-display (&rest _)
-  (when (and grove-graph--raw-svg (get-buffer-window (current-buffer) t))
-    (let* ((inhibit-read-only t)
-           (win (get-buffer-window (current-buffer) t))
-           (width (max 100 (truncate (* (window-pixel-width win) grove-graph--scale))))
-           (height (max 100 (truncate (* (window-pixel-height win) grove-graph--scale))))
-           (sized-svg (grove-graph--adjust-svg-dimensions grove-graph--raw-svg width height)))
-      (when (= (buffer-size) 0) (insert " "))
-      (let* ((max-image-size nil)
-             (encoded-svg (if (multibyte-string-p sized-svg) (encode-coding-string sized-svg 'utf-8) sized-svg)))
-        (clear-image-cache)
-        (put-text-property (point-min) (point-max) 'display (create-image encoded-svg 'svg t)))
-      (put-text-property (point-min) (point-max) 'keymap grove-graph-mode-map))))
-
-(defun grove-graph--smil-start ()
-  "Starts the animation playback loop if frames are populated."
-  (when (or grove-graph--frame-vector grove-graph--frame-offsets)
-    (unless grove-graph--smil-timer
-      (setq grove-graph--smil-timer (run-with-timer 0 0.016 #'grove-graph--smil-update)))))
-
-(defun grove-graph--smil-stop ()
-  "Halts the animation loop."
-  (when grove-graph--smil-timer
-    (cancel-timer grove-graph--smil-timer)
-    (setq grove-graph--smil-timer nil)))
-
-(defun grove-graph--smil-update ()
-  "Advances the animation frame natively from either RAM or hidden buffers."
-  (let ((graph-buf (get-buffer "*grove-graph*")))
-    (when (buffer-live-p graph-buf)
-      (with-current-buffer graph-buf
-        (let ((total-frames (or (and grove-graph--frame-offsets (length grove-graph--frame-offsets))
-                                (and grove-graph--frame-vector (length grove-graph--frame-vector))
-                                0)))
-          (when (> total-frames 0)
-            (if (< grove-graph--current-frame total-frames)
-                (progn
-                  (let ((bounds (when grove-graph--frame-offsets 
-                                  (aref grove-graph--frame-offsets grove-graph--current-frame))))
-                    (setq grove-graph--raw-svg
-                          (if bounds
-                              (with-current-buffer grove-graph--playback-buffer
-                                (buffer-substring-no-properties (car bounds) (cdr bounds)))
-                            (aref grove-graph--frame-vector grove-graph--current-frame))))
-                  (grove-graph--update-display)
-                  (cl-incf grove-graph--current-frame))
-              (grove-graph--smil-stop))))))))
-
-(defun grove-extra-graph-mode-setup ()
-  (setq-local cursor-type nil)
-  (setq-local bidi-display-reordering nil)
-  (face-remap-add-relative 'default :background grove-graph-bg-color)
-  (add-hook 'kill-buffer-hook 
-            (lambda ()
-              (when (buffer-live-p grove-graph--playback-buffer)
-                (kill-buffer grove-graph--playback-buffer))
-              (when (fboundp 'grove-graph--smil-stop)
-                (grove-graph--smil-stop))) 
-            nil t)
-  (add-hook 'window-size-change-functions #'grove-graph--update-display nil t)
-  (define-key grove-graph-mode-map (kbd "+") #'grove-graph-zoom-in)
-  (define-key grove-graph-mode-map (kbd "-") #'grove-graph-zoom-out)
-  (define-key grove-graph-mode-map (kbd "0") #'grove-graph-zoom-reset)
-  (define-key grove-graph-mode-map (kbd "<wheel-up>") #'grove-graph-zoom-in)
-  (define-key grove-graph-mode-map (kbd "<wheel-down>") #'grove-graph-zoom-out))
-
-(defun grove-graph-zoom-in ()
-  (interactive)
-  (setq grove-graph--scale (* grove-graph--scale 1.2))
-  (grove-graph--update-display))
-
-(defun grove-graph-zoom-out ()
-  (interactive)
-  (setq grove-graph--scale (/ grove-graph--scale 1.2))
-  (grove-graph--update-display))
-
-(defun grove-graph-zoom-reset ()
-  (interactive)
-  (setq grove-graph--scale (if (eq grove-graph-renderer 'fa2) 1.0 grove-graph-default-zoom))
-  (grove-graph--update-display))
 
 (defun grove-extra-around-graph-adjacency-list (orig-fun)
   (if grove-extra-mode
@@ -624,8 +563,78 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
                        (cl-reduce #'+ (mapcar (lambda (e) (length (cdr e))) adjacency)))))))
     (funcall orig-fun)))
 
+(defun grove-graph--adjust-svg-dimensions (svg-string width height)
+  (if (string-match "<svg\\([^>]*?\\)>" svg-string)
+      (let* ((attrs (match-string 1 svg-string))
+             (clean-attrs (replace-regexp-in-string "[ \t\n\r]*\\(?:width\\|height\\)=\"[^\"]*\"" "" attrs)))
+        (replace-match (format "<svg width=\"%d\" height=\"%d\" preserveAspectRatio=\"xMidYMid meet\"%s>" width height clean-attrs) t t svg-string))
+    svg-string))
+
+(defun grove-graph--update-display (&rest _)
+  (when (and grove-graph--raw-svg (get-buffer-window (current-buffer) t))
+    (let* ((inhibit-read-only t)
+           (win (get-buffer-window (current-buffer) t))
+           (width (max 100 (truncate (* (window-pixel-width win) grove-graph--scale))))
+           (height (max 100 (truncate (* (window-pixel-height win) grove-graph--scale))))
+           (sized-svg (grove-graph--adjust-svg-dimensions grove-graph--raw-svg width height)))
+      (when (= (buffer-size) 0) (insert " "))
+      (let* ((max-image-size nil)
+             (encoded-svg (if (multibyte-string-p sized-svg) (encode-coding-string sized-svg 'utf-8) sized-svg)))
+        (clear-image-cache)
+        (put-text-property (point-min) (point-max) 'display (create-image encoded-svg 'svg t)))
+      (put-text-property (point-min) (point-max) 'keymap grove-graph-mode-map))))
+
+(defun grove-graph--smil-start ()
+  "Starts the animation playback loop if frames are populated."
+  (when (or grove-graph--frame-vector grove-graph--frame-offsets)
+    (unless grove-graph--smil-timer
+      (setq grove-graph--smil-timer (run-with-timer 0 0.016 #'grove-graph--smil-update)))))
+
+(defun grove-graph--smil-stop ()
+  "Halts the animation loop."
+  (when grove-graph--smil-timer
+    (cancel-timer grove-graph--smil-timer)
+    (setq grove-graph--smil-timer nil)))
+
+(defun grove-graph--smil-update ()
+  "Advances the animation frame natively from either RAM or hidden buffers."
+  (let ((graph-buf (get-buffer "*grove-graph*")))
+    (when (buffer-live-p graph-buf)
+      (with-current-buffer graph-buf
+        (let ((total-frames (or (and grove-graph--frame-offsets (length grove-graph--frame-offsets))
+                                (and grove-graph--frame-vector (length grove-graph--frame-vector))
+                                0)))
+          (when (> total-frames 0)
+            (if (< grove-graph--current-frame total-frames)
+                (progn
+                  (let ((bounds (when grove-graph--frame-offsets 
+                                  (aref grove-graph--frame-offsets grove-graph--current-frame))))
+                    (setq grove-graph--raw-svg
+                          (if bounds
+                              (with-current-buffer grove-graph--playback-buffer
+                                (buffer-substring-no-properties (car bounds) (cdr bounds)))
+                            (aref grove-graph--frame-vector grove-graph--current-frame))))
+                  (grove-graph--update-display)
+                  (cl-incf grove-graph--current-frame))
+              (grove-graph--smil-stop))))))))
+
+(defun grove-graph-zoom-in ()
+  (interactive)
+  (setq grove-graph--scale (* grove-graph--scale 1.2))
+  (grove-graph--update-display))
+
+(defun grove-graph-zoom-out ()
+  (interactive)
+  (setq grove-graph--scale (/ grove-graph--scale 1.2))
+  (grove-graph--update-display))
+
+(defun grove-graph-zoom-reset ()
+  (interactive)
+  (setq grove-graph--scale (if (eq grove-graph-renderer 'fa2) 1.0 grove-graph-default-zoom))
+  (grove-graph--update-display))
+
 ;;;; ===========================================================================
-;;;; MINOR MODE DEFINITION
+;;;; GLOBAL MINOR MODE DEFINITION
 ;;;; ===========================================================================
 
 ;;;###autoload
@@ -635,11 +644,12 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
   :group 'grove-extra
   (if grove-extra-mode
       (progn
-        ;; Apply Setup Hooks
+        ;; 1. Activate Hooks
+        (add-hook 'grove-graph-mode-hook #'grove-extra--enable-graph-mode)
+        (add-hook 'grove-capture-mode-hook #'grove-extra--enable-capture-mode)
         (add-hook 'find-file-hook #'grove-extra--turn-on-hook)
-        (add-hook 'grove-graph-mode-hook #'grove-extra-graph-mode-setup)
         
-        ;; Apply Non-Destructive Advice
+        ;; 2. Apply Advice Wrappers
         (advice-add 'grove--parse-note :around #'grove-extra-around-parse-note)
         (advice-add 'grove--refresh-cache :around #'grove-extra-around-refresh-cache)
         (advice-add 'grove-file-p :around #'grove-extra-around-file-p)
@@ -661,11 +671,12 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
         (advice-add 'grove-tree--item-count :around #'grove-extra-around-tree-item-count)
         (advice-add 'grove-search :around #'grove-extra-around-search))
     (progn
-      ;; Teardown Hooks
+      ;; 1. Deactivate Hooks
+      (remove-hook 'grove-graph-mode-hook #'grove-extra--enable-graph-mode)
+      (remove-hook 'grove-capture-mode-hook #'grove-extra--enable-capture-mode)
       (remove-hook 'find-file-hook #'grove-extra--turn-on-hook)
-      (remove-hook 'grove-graph-mode-hook #'grove-extra-graph-mode-setup)
       
-      ;; Teardown Advice
+      ;; 2. Remove Advice Wrappers
       (advice-remove 'grove--parse-note #'grove-extra-around-parse-note)
       (advice-remove 'grove--refresh-cache #'grove-extra-around-refresh-cache)
       (advice-remove 'grove-file-p #'grove-extra-around-file-p)
