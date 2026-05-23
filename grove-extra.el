@@ -74,6 +74,13 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
 ;;;; CORE UTILITIES & PREDICATES
 ;;;; ===========================================================================
 
+(defun grove-extra--lock-sidebar-windows (&rest _)
+  "Make Grove sidebar windows strongly dedicated to prevent buffer swapping."
+  (dolist (buf-name '("*grove-tree*" "*grove-graph*"))
+    (let ((win (get-buffer-window buf-name)))
+      (when win
+        (set-window-dedicated-p win t)))))
+
 (defun grove-extra--make-ci-regexp (str)
   "Create a case-insensitive regexp string from STR."
   (mapconcat (lambda (c)
@@ -669,7 +676,10 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
         (advice-add 'grove-backlinks :around #'grove-extra-around-backlinks)
         (advice-add 'grove-tree--list-entries :around #'grove-extra-around-tree-list-entries)
         (advice-add 'grove-tree--item-count :around #'grove-extra-around-tree-item-count)
-        (advice-add 'grove-search :around #'grove-extra-around-search))
+        (advice-add 'grove-search :around #'grove-extra-around-search)
+
+        (advice-add 'grove-tree-open :after #'grove-extra--lock-sidebar-windows)
+        (advice-add 'grove-extra-graph :after #'grove-extra--lock-sidebar-windows))
     (progn
       ;; 1. Deactivate Hooks
       (remove-hook 'grove-graph-mode-hook #'grove-extra--enable-graph-mode)
@@ -696,7 +706,9 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
       (advice-remove 'grove-backlinks #'grove-extra-around-backlinks)
       (advice-remove 'grove-tree--list-entries #'grove-extra-around-tree-list-entries)
       (advice-remove 'grove-tree--item-count #'grove-extra-around-tree-item-count)
-      (advice-remove 'grove-search #'grove-extra-around-search))))
+      (advice-remove 'grove-search #'grove-extra-around-search)
+      (advice-remove 'grove-tree-open #'grove-extra--lock-sidebar-windows)
+      (advice-remove 'grove-extra-graph #'grove-extra--lock-sidebar-windows))))
 
 (provide 'grove-extra)
 ;;; grove-extra.el ends here
