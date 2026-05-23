@@ -67,12 +67,21 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
 (defvar-local grove-graph--playback-buffer nil)
 (defvar-local grove-graph--frame-offsets nil)
 
+(defvar grove-extra--previous-track-mouse nil)
+
 ;; Override the Link Regex to support Aliases globally
 (setq grove-link--regexp "\\[\\[\\([^]\n|]+\\)\\(?:|[^]\n]+\\|\\]\\[[^]\n]+\\)?\\]\\]")
 
 ;;;; ===========================================================================
 ;;;; CORE UTILITIES & PREDICATES
 ;;;; ===========================================================================
+
+(defun grove-extra--lock-sidebar-windows (&rest _)
+  "Make Grove sidebar windows strongly dedicated to prevent buffer swapping."
+  (dolist (buf-name '("*grove-tree*" "*grove-graph*"))
+    (let ((win (get-buffer-window buf-name)))
+      (when win
+        (set-window-dedicated-p win t)))))
 
 (defun grove-extra--make-ci-regexp (str)
   "Create a case-insensitive regexp string from STR."
@@ -633,9 +642,104 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
   (setq grove-graph--scale (if (eq grove-graph-renderer 'fa2) 1.0 grove-graph-default-zoom))
   (grove-graph--update-display))
 
+(defun grove-extra--graph-node-at-pos (posn)
+  "Helper function: returns the node name at POSN in the graph, or nil."
+  (let ((obj-xy (posn-object-x-y posn))
+        (obj-size (posn-object-width-height posn)))
+    (when (and obj-xy obj-size (> (car obj-size) 0) (> (cdr obj-size) 0))
+      (let* ((px (car obj-xy))
+             (py (cdr obj-xy))
+             (img-w (float (car obj-size)))
+             (img-h (float (cdr obj-size)))
+             (canvas-size grove-graph-fa2--canvas-size)
+             (half-canvas (/ canvas-size 2.0))
+             
+             (min-dim (min img-w img-h))
+             (pad-x (/ (- img-w min-dim) 2.0))
+             (pad-y (/ (- img-h min-dim) 2.0))
+             (graph-px (- px pad-x))
+             (graph-py (- py pad-y))
+             
+             (uniform-scale (/ canvas-size min-dim))
+             (svg-x (- (* graph-px uniform-scale) half-canvas))
+             (svg-y (- (* graph-py uniform-scale) half-canvas))
+             
+             (nodes grove-graph-fa2--bg-nodes)
+             (len (if nodes (length nodes) 0))
+             (closest-node nil)
+             (min-dist-sq 144.0))
+
+        (dotimes (i len)
+          (let* ((n (aref nodes i))
+                 (dx (- svg-x (fa2-x n)))
+                 (dy (- svg-y (fa2-y n)))
+                 (dist-sq (+ (* dx dx) (* dy dy))))
+            (when (< dist-sq min-dist-sq)
+              (setq min-dist-sq dist-sq)
+              (setq closest-node (fa2-name n)))))
+        closest-node))))
+
+(defun grove-extra--track-graph-mouse (event)
+  "Display the hovered node name globally, even if the buffer is inactive."
+  (interactive "e")
+  (let* ((posn (event-start event))
+         (window (posn-window posn)))
+    ;; Performance Guard: Only do the math if the mouse is physically over the graph window
+    (when (and (window-live-p window)
+               (equal (buffer-name (window-buffer window)) "*grove-graph*"))
+      (with-current-buffer (window-buffer window)
+        (let ((node (grove-extra--graph-node-at-pos posn)))
+          (if node
+              (message "Node: %s" node)
+            ;; Silently clear the echo area when the mouse leaves a node
+            (message nil)))))))
+
+(defun grove-extra--click-graph-node (event)
+  "Open the clicked node in the main editor window safely."
+  (interactive "e")
+  (let* ((posn (event-start event))
+         (window (posn-window posn)))
+    (when (and (window-live-p window)
+               (equal (buffer-name (window-buffer window)) "*grove-graph*"))
+      (with-current-buffer (window-buffer window)
+        (let ((node (grove-extra--graph-node-at-pos posn)))
+          (when node
+            (let* ((main-win (or (grove-tree--main-window) (next-window window)))
+                   (target-file (grove-extra--resolve-node-to-file node)))
+              ;; must defer
+              (run-at-time 0 nil
+                           (lambda (win file node-name)
+                             (when (window-live-p win)
+                               (select-window win))
+                             (find-file file)
+                             (message "Opened: %s" node-name))
+                           main-win target-file node))))))))
+
+(defun grove-extra--enable-graph-mode ()
+  "Enhance the graph mode with interactive click bindings."
+  ;; Use down-mouse-1 to reliably intercept the click before Emacs image modules do
+  (local-set-key [down-mouse-1] #'grove-extra--click-graph-node))
+
+(defun grove-extra--resolve-node-to-file (node)
+  "Resolve a NODE name to an absolute file path using Grove's internal logic."
+  (if (fboundp 'grove-link--resolve)
+      ;; Tap directly into the core grove: link resolution algorithm
+      (grove-link--resolve node)
+    ;; Robust fallback: recursively search the vault for a matching filename
+    (let ((files (directory-files-recursively grove-directory (format "^%s\\." (regexp-quote node)))))
+      (if files
+          (car files)
+        (expand-file-name (format "%s.md" node) grove-directory)))))
+
 ;;;; ===========================================================================
 ;;;; GLOBAL MINOR MODE DEFINITION
 ;;;; ===========================================================================
+
+(defvar grove-extra-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mouse-movement] #'grove-extra--track-graph-mouse)
+    map)
+  "Global keymap for grove-extra-mode.")
 
 ;;;###autoload
 (define-minor-mode grove-extra-mode
@@ -644,6 +748,9 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
   :group 'grove-extra
   (if grove-extra-mode
       (progn
+        (setq grove-extra--previous-track-mouse (default-value 'track-mouse))
+        (setq-default track-mouse t)
+        
         ;; 1. Activate Hooks
         (add-hook 'grove-graph-mode-hook #'grove-extra--enable-graph-mode)
         (add-hook 'grove-capture-mode-hook #'grove-extra--enable-capture-mode)
@@ -669,8 +776,13 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
         (advice-add 'grove-backlinks :around #'grove-extra-around-backlinks)
         (advice-add 'grove-tree--list-entries :around #'grove-extra-around-tree-list-entries)
         (advice-add 'grove-tree--item-count :around #'grove-extra-around-tree-item-count)
-        (advice-add 'grove-search :around #'grove-extra-around-search))
+        (advice-add 'grove-search :around #'grove-extra-around-search)
+
+        (advice-add 'grove-tree-open :after #'grove-extra--lock-sidebar-windows)
+        (advice-add 'grove-extra-graph :after #'grove-extra--lock-sidebar-windows))
     (progn
+      (setq-default track-mouse grove-extra--previous-track-mouse)
+      
       ;; 1. Deactivate Hooks
       (remove-hook 'grove-graph-mode-hook #'grove-extra--enable-graph-mode)
       (remove-hook 'grove-capture-mode-hook #'grove-extra--enable-capture-mode)
@@ -696,7 +808,9 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
       (advice-remove 'grove-backlinks #'grove-extra-around-backlinks)
       (advice-remove 'grove-tree--list-entries #'grove-extra-around-tree-list-entries)
       (advice-remove 'grove-tree--item-count #'grove-extra-around-tree-item-count)
-      (advice-remove 'grove-search #'grove-extra-around-search))))
+      (advice-remove 'grove-search #'grove-extra-around-search)
+      (advice-remove 'grove-tree-open #'grove-extra--lock-sidebar-windows)
+      (advice-remove 'grove-extra-graph #'grove-extra--lock-sidebar-windows))))
 
 (provide 'grove-extra)
 ;;; grove-extra.el ends here
