@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.2.2
+;; Version: 0.2.6
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -72,6 +72,8 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
 (defvar-local grove-graph--playback-buffer nil)
 (defvar-local grove-graph--frame-offsets nil)
 (defvar-local grove-extra--hovered-node nil)
+(defvar-local grove-extra--parsed-svg-string nil)
+(defvar-local grove-extra--parsed-svg-nodes nil)
 
 (defvar grove-extra--previous-track-mouse nil)
 
@@ -124,6 +126,28 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
              (grove-file-p (buffer-file-name)))
     (grove-mode 1)))
 
+(defun grove-extra--unescape-xml (str)
+  "Restore standard characters from XML-escaped node names."
+  (let ((s (replace-regexp-in-string "&quot;" "\"" str)))
+    (setq s (replace-regexp-in-string "&gt;" ">" s))
+    (setq s (replace-regexp-in-string "&lt;" "<" s))
+    (setq s (replace-regexp-in-string "&amp;" "&" s))
+    s))
+
+(defun grove-extra--parse-fa2-svg (svg-string)
+  "Extracts node coordinates directly from the visual SVG text."
+  (let ((nodes nil)
+        (start 0))
+    ;; Rapidly find all pairs of <circle> and <text> tags in the frame
+    (while (string-match "<circle cx=\"\\(-?[0-9]+\\)\" cy=\"\\(-?[0-9]+\\)\"[^>]*>[ \t\n\r]*<text[^>]*>\\([^<]+\\)</text>" svg-string start)
+      (let ((name (grove-extra--unescape-xml (match-string 3 svg-string)))
+            (x (string-to-number (match-string 1 svg-string)))
+            (y (string-to-number (match-string 2 svg-string))))
+        ;; Pack into a vector mimicking the physics engine: [name x y]
+        (push (vector name x y) nodes))
+      (setq start (match-end 0)))
+    (vconcat nodes)))
+
 ;;;; ===========================================================================
 ;;;; BUFFER-LOCAL MINOR MODES (UI & STATE)
 ;;;; ===========================================================================
@@ -137,8 +161,13 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
     (define-key map (kbd "0") #'grove-graph-zoom-reset)
     (define-key map (kbd "<wheel-up>") #'grove-graph-zoom-in)
     (define-key map (kbd "<wheel-down>") #'grove-graph-zoom-out)
+    
+    (define-key map [mouse-movement] #'grove-extra--track-graph-mouse)
+    (define-key map (kbd "<mouse-movement>") #'grove-extra--track-graph-mouse)
+    (define-key map [down-mouse-1] #'grove-extra--click-graph-node)
+    (define-key map (kbd "<down-mouse-1>") #'grove-extra--click-graph-node)
     map)
-  "Keymap overriding `grove-graph-mode-map` with zooming tools.")
+  "Keymap overriding `grove-graph-mode-map` with zooming and mouse tools.")
 
 (defun grove-extra--graph-cleanup ()
   "Clean up playback buffers and timers when the graph is closed."
@@ -172,8 +201,7 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
   "Turn on extra graph features, interactive bindings, and mouse tracking."
   (when grove-extra-mode
     (grove-extra-graph-mode 1)
-    (setq-local track-mouse t)
-    (local-set-key [down-mouse-1] #'grove-extra--click-graph-node)))
+    (setq-local track-mouse t)))
 
 ;;; --- Capture Extension Mode ---
 
@@ -558,6 +586,9 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
                (buf (get-buffer-create "*grove-graph*")))
           (with-current-buffer buf
             (grove-graph-mode)
+            
+            (grove-extra--enable-graph-mode)
+            
             (when (fboundp 'grove-graph--smil-stop) (grove-graph--smil-stop))
             (setq-local grove-graph--scale (if (eq grove-graph-renderer 'fa2) 1.0 grove-graph-default-zoom))
             (let ((inhibit-read-only t)) (erase-buffer)))
@@ -662,44 +693,59 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
 
 (defun grove-extra--graph-node-at-pos (posn)
   "Helper function: returns the node name at POSN in the graph, or nil."
-  (let ((obj-xy (posn-object-x-y posn))
-        (obj-size (posn-object-width-height posn)))
-    (when (and obj-xy obj-size (> (car obj-size) 0) (> (cdr obj-size) 0))
-      (let* ((px (car obj-xy))
-             (py (cdr obj-xy))
-             (img-w (float (car obj-size)))
-             (img-h (float (cdr obj-size)))
-             (canvas-size grove-graph-fa2--canvas-size)
-             (half-canvas (/ canvas-size 2.0))
-             
-             (min-dim (min img-w img-h))
-             (pad-x (/ (- img-w min-dim) 2.0))
-             (pad-y (/ (- img-h min-dim) 2.0))
-             (graph-px (- px pad-x))
-             (graph-py (- py pad-y))
-             
-             (uniform-scale (/ canvas-size min-dim))
-             (svg-x (- (* graph-px uniform-scale) half-canvas))
-             (svg-y (- (* graph-py uniform-scale) half-canvas))
-             
-             (nodes grove-graph-fa2--bg-nodes)
-             (len (if nodes (length nodes) 0))
-             (closest-node nil)
-             (min-dist-sq 144.0))
+  (let* ((window (posn-window posn))
+         (win-xy (posn-x-y posn)))
+    
+    (when (and window win-xy)
+      (with-current-buffer (window-buffer window)
+        
+        ;; --- LAZY EVALUATION: Only re-parse if the visual frame changes ---
+        (unless (eq grove-graph--raw-svg grove-extra--parsed-svg-string)
+          (setq grove-extra--parsed-svg-nodes (grove-extra--parse-fa2-svg grove-graph--raw-svg))
+          (setq grove-extra--parsed-svg-string grove-graph--raw-svg))
+        
+        (let* ((px (car win-xy))
+               (py (cdr win-xy))
+               (scale (or grove-graph--scale 1.0))
+               
+               (img-w (float (max 100 (truncate (* (window-pixel-width window) scale)))))
+               (img-h (float (max 100 (truncate (* (window-pixel-height window) scale)))))
+               
+               (canvas-size grove-graph-fa2--canvas-size)
+               (half-canvas (/ canvas-size 2.0))
+               
+               (min-dim (min img-w img-h))
+               (pad-x (/ (- img-w min-dim) 2.0))
+               (pad-y (/ (- img-h min-dim) 2.0))
+               
+               (graph-px (- px pad-x))
+               (graph-py (- py pad-y))
+               
+               (uniform-scale (/ canvas-size min-dim))
+               (svg-x (- (* graph-px uniform-scale) half-canvas))
+               (svg-y (- (* graph-py uniform-scale) half-canvas))
+               
+               ;; --- USE THE VISUAL DATA INSTEAD OF THE PHYSICS ENGINE ---
+               (nodes grove-extra--parsed-svg-nodes)
+               (len (if nodes (length nodes) 0))
+               (closest-node nil)
+               (min-dist-sq 144.0))
 
-        (dotimes (i len)
-          (let* ((n (aref nodes i))
-                 (dx (- svg-x (fa2-x n)))
-                 (dy (- svg-y (fa2-y n)))
-                 (dist-sq (+ (* dx dx) (* dy dy))))
-            (when (< dist-sq min-dist-sq)
-              (setq min-dist-sq dist-sq)
-              (setq closest-node (fa2-name n)))))
-        closest-node))))
+          (dotimes (i len)
+            (let* ((n (aref nodes i))
+                   ;; Uses fa2-x and fa2-y accessors natively
+                   (dx (- svg-x (fa2-x n)))
+                   (dy (- svg-y (fa2-y n)))
+                   (dist-sq (+ (* dx dx) (* dy dy))))
+              (when (< dist-sq min-dist-sq)
+                (setq min-dist-sq dist-sq)
+                (setq closest-node (fa2-name n)))))
+          closest-node)))))
 
 (defun grove-extra--track-graph-mouse (event)
   "Display the hovered node name globally and swap cursor to a hand icon."
   (interactive "e")
+
   (let* ((posn (event-start event))
          (window (posn-window posn)))
     (when (and (window-live-p window)
@@ -707,7 +753,8 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
       (with-current-buffer (window-buffer window)
         (let ((node (grove-extra--graph-node-at-pos posn))
               (inhibit-read-only t))
-          (setq grove-extra--hovered-node node) ;; Save state for the renderer
+          (setq grove-extra--hovered-node node)
+          
           (if node
               (progn
                 (message "Node: %s" node)
@@ -719,6 +766,7 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
 (defun grove-extra--click-graph-node (event)
   "Open the clicked node in the main editor window safely."
   (interactive "e")
+  
   (let* ((posn (event-start event))
          (window (posn-window posn)))
     (when (and (window-live-p window)
@@ -728,7 +776,6 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
           (when node
             (let* ((main-win (or (grove-tree--main-window) (next-window window)))
                    (target-file (grove-extra--resolve-node-to-file node)))
-              ;; must defer
               (run-at-time 0 nil
                            (lambda (win file node-name)
                              (when (window-live-p win)
