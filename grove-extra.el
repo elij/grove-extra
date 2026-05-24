@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.2.1
+;; Version: 0.2.2
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -56,6 +56,11 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
 (defcustom grove-graph-default-zoom 4.5
   "The default zoom scale for the graph upon opening."
   :type 'float
+  :group 'grove-extra)
+
+(defcustom grove-graph-deterministic-positions nil
+  "When non-nil, use a deterministic seed for node positions based on string and offset."
+  :type 'boolean
   :group 'grove-extra)
 
 ;; Graph State Variables
@@ -553,9 +558,15 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
             (setq-local grove-graph--scale (if (eq grove-graph-renderer 'fa2) 1.0 grove-graph-default-zoom))
             (let ((inhibit-read-only t)) (erase-buffer)))
           
-          (if (fboundp 'grove-graph--display)
-              (grove-graph--display buf)
-            (switch-to-buffer buf))
+          ;; --- NEW: Dock into a dedicated sidebar ---
+          (let ((win (display-buffer-in-side-window
+                      buf
+                      `((side . right)
+                        (slot . 0)
+                        (window-width . 80)
+                        (window-parameters . ((no-other-window . nil)
+                                              (no-delete-other-windows . t)))))))
+            (when win (window-preserve-size win t t)))
           
           (if (eq grove-graph-renderer 'fa2)
               (grove-graph-fa2-start buf adjacency)
@@ -680,19 +691,24 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
         closest-node))))
 
 (defun grove-extra--track-graph-mouse (event)
-  "Display the hovered node name globally, even if the buffer is inactive."
+  "Display the hovered node name globally and swap cursor to a hand icon."
   (interactive "e")
   (let* ((posn (event-start event))
          (window (posn-window posn)))
-    ;; Performance Guard: Only do the math if the mouse is physically over the graph window
     (when (and (window-live-p window)
                (equal (buffer-name (window-buffer window)) "*grove-graph*"))
       (with-current-buffer (window-buffer window)
-        (let ((node (grove-extra--graph-node-at-pos posn)))
+        (let ((node (grove-extra--graph-node-at-pos posn))
+              (inhibit-read-only t))
           (if node
-              (message "Node: %s" node)
-            ;; Silently clear the echo area when the mouse leaves a node
-            (message nil)))))))
+              (progn
+                (message "Node: %s" node)
+                ;; Transform the cursor into a clickable hand
+                (put-text-property (point-min) (point-max) 'pointer 'hand))
+            (progn
+              (message nil)
+              ;; Revert the cursor back to the default arrow
+              (put-text-property (point-min) (point-max) 'pointer nil))))))))
 
 (defun grove-extra--click-graph-node (event)
   "Open the clicked node in the main editor window safely."
