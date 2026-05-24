@@ -71,6 +71,7 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
 (defvar-local grove-graph--frame-vector nil)
 (defvar-local grove-graph--playback-buffer nil)
 (defvar-local grove-graph--frame-offsets nil)
+(defvar-local grove-extra--hovered-node nil)
 
 (defvar grove-extra--previous-track-mouse nil)
 
@@ -168,8 +169,11 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
       (remove-hook 'window-size-change-functions #'grove-graph--update-display t))))
 
 (defun grove-extra--enable-graph-mode ()
-  "Turn on the extra graph features if the global mode is active."
-  (when grove-extra-mode (grove-extra-graph-mode 1)))
+  "Turn on extra graph features, interactive bindings, and mouse tracking."
+  (when grove-extra-mode
+    (grove-extra-graph-mode 1)
+    (setq-local track-mouse t)
+    (local-set-key [down-mouse-1] #'grove-extra--click-graph-node)))
 
 ;;; --- Capture Extension Mode ---
 
@@ -601,8 +605,11 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
       (let* ((max-image-size nil)
              (encoded-svg (if (multibyte-string-p sized-svg) (encode-coding-string sized-svg 'utf-8) sized-svg)))
         (clear-image-cache)
-        (put-text-property (point-min) (point-max) 'display (create-image encoded-svg 'svg t)))
-      (put-text-property (point-min) (point-max) 'keymap grove-graph-mode-map))))
+        (put-text-property (point-min) (point-max) 'display (create-image encoded-svg 'svg t))
+        
+        ;; Ensure the cursor survives the 60fps animation redraw loop
+        (when grove-extra--hovered-node
+          (put-text-property (point-min) (point-max) 'pointer 'hand))))))
 
 (defun grove-graph--smil-start ()
   "Starts the animation playback loop if frames are populated."
@@ -700,14 +707,13 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
       (with-current-buffer (window-buffer window)
         (let ((node (grove-extra--graph-node-at-pos posn))
               (inhibit-read-only t))
+          (setq grove-extra--hovered-node node) ;; Save state for the renderer
           (if node
               (progn
                 (message "Node: %s" node)
-                ;; Transform the cursor into a clickable hand
                 (put-text-property (point-min) (point-max) 'pointer 'hand))
             (progn
               (message nil)
-              ;; Revert the cursor back to the default arrow
               (put-text-property (point-min) (point-max) 'pointer nil))))))))
 
 (defun grove-extra--click-graph-node (event)
@@ -730,11 +736,6 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
                              (find-file file)
                              (message "Opened: %s" node-name))
                            main-win target-file node))))))))
-
-(defun grove-extra--enable-graph-mode ()
-  "Enhance the graph mode with interactive click bindings."
-  ;; Use down-mouse-1 to reliably intercept the click before Emacs image modules do
-  (local-set-key [down-mouse-1] #'grove-extra--click-graph-node))
 
 (defun grove-extra--resolve-node-to-file (node)
   "Resolve a NODE name to an absolute file path using Grove's internal logic."
