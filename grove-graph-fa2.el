@@ -56,8 +56,11 @@
     s))
 
 (defun grove-graph-fa2--hash-pos (str offset)
-  "Return a deterministic pseudo-random float between -500 and 500 based on STR and OFFSET."
-  (- (mod (string-to-number (substring (secure-hash 'md5 (concat str offset)) 0 8) 16) 1000) 500.0))
+  "Return a deterministic pseudo-random float between -500 and 500 based on STR and OFFSET or random."
+  (if grove-graph-deterministic-positions
+      (- (mod (string-to-number (substring (secure-hash 'md5 (concat str offset)) 0 8) 16) 1000) 500.0)
+    (- (random 1000.0) 500.0)
+    ))
 
 (defun grove-graph-fa2--init-sim (adjacency)
   "Initialise node arrays, edge tuples, and pre-compute the static mass matrix."
@@ -290,7 +293,7 @@
           (progn
             (message "Loading cached graph...")
             (grove-graph-fa2--load-and-play buf data-file))
-        
+
         (message "Rendering cache in background (this may take a few minutes)...")
         (when grove-graph-fa2--bg-timer (cancel-timer grove-graph-fa2--bg-timer))
         (when (buffer-live-p grove-graph-fa2--bg-buffer) (kill-buffer grove-graph-fa2--bg-buffer))
