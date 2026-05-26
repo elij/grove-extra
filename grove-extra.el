@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.2.2
+;; Version: 0.2.3
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -209,19 +209,42 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
             title tags links)
         (with-temp-buffer
           (insert-file-contents file)
+          
+          ;; 1. Extract Title
           (goto-char (point-min))
-          (when (re-search-forward "^\\(?:#\\+title:\\|title:\\|#\\)\\s-*\\(.+\\)" nil t)
-            (setq title (string-trim (match-string 1) "[ \t\n\r\"]+")))
+          ;; Prioritise explicit metadata (YAML 'title:' or Org '#+title:')
+          (if (re-search-forward "^\\(?:#\\+title:\\|title:\\)\\s-*\\(.+\\)" nil t)
+              (setq title (string-trim (match-string 1) "[ \t\n\r\"]+"))
+            
+            ;; Otherwise, skip the frontmatter block
+            (goto-char (point-min))
+            (when (looking-at-p "^---[ \t]*$")
+              (forward-line 1)
+              (when (re-search-forward "^---[ \t]*$" nil t)
+                (forward-line 1)))
+            
+            ;; And grab the first Markdown or Org heading
+            (when (re-search-forward "^\\(?:#+\\|\\*+\\)[ \t]+\\(.*\\)" nil t)
+              (setq title (string-trim (match-string 1) "[ \t\n\r\"]+"))))
+          
+          ;; Fallback: Guarantee a title string to prevent 'nil' crashes globally
+          (unless title
+            (setq title (file-name-sans-extension (file-name-nondirectory file))))
+          
+          ;; 2. Extract Tags
           (goto-char (point-min))
           (when (re-search-forward "^\\(?:#\\+filetags:\\|tags:\\)\\s-*\\(.+\\)" nil t)
             (let ((raw-tags (match-string 1)))
               (setq raw-tags (replace-regexp-in-string "[\\[\\]\"']" "" raw-tags))
               (setq tags (split-string raw-tags "[:,]\\s-*" t "\\s-*"))))
           (setq tags (grove--merge-tags tags (grove--collect-inline-tags)))
+          
+          ;; 3. Extract Links
           (goto-char (point-min))
           (while (re-search-forward grove-link--regexp nil t)
             (let ((target (match-string-no-properties 1)))
               (push target links)))
+          
           (list :title title :tags tags :links (nreverse links) :mtime mtime)))
     (funcall orig-fun file)))
 
@@ -521,25 +544,36 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
         (let ((adjacency (make-hash-table :test #'equal))
               (all-titles (make-hash-table :test #'equal))
               (resolution-map (make-hash-table :test #'equal)))
+          
+          ;; First Pass: Safely populate the maps
           (maphash (lambda (path meta)
                      (let* ((title (plist-get meta :title))
                             (rel-path (file-relative-name path grove-directory))
                             (rel-no-ext (file-name-sans-extension rel-path))
                             (filename-no-ext (file-name-sans-extension (file-name-nondirectory path))))
-                       (puthash title t all-titles)
-                       (puthash (downcase title) title resolution-map)
-                       (puthash (downcase rel-path) title resolution-map)
-                       (puthash (downcase rel-no-ext) title resolution-map)
-                       (puthash (downcase filename-no-ext) title resolution-map)))
+                       
+                       ;; Only attempt to hash and downcase if the title is actually text
+                       (when (stringp title)
+                         (puthash title t all-titles)
+                         (puthash (downcase title) title resolution-map)
+                         (when (stringp rel-path)
+                           (puthash (downcase rel-path) title resolution-map)
+                           (puthash (downcase rel-no-ext) title resolution-map)
+                           (puthash (downcase filename-no-ext) title resolution-map)))))
                    grove--cache)
+          
+          ;; Second Pass: Safely map the links
           (maphash (lambda (_path meta)
                      (let ((source (plist-get meta :title))
                            (links (plist-get meta :links)))
                        (dolist (raw-target links)
-                         (let ((resolved-target (gethash (downcase raw-target) resolution-map)))
-                           (when (and resolved-target (gethash resolved-target all-titles))
-                             (push resolved-target (gethash source adjacency)))))))
+                         ;; CRITICAL: Ensure the target link isn't empty before downcasing
+                         (when (stringp raw-target)
+                           (let ((resolved-target (gethash (downcase raw-target) resolution-map)))
+                             (when (and resolved-target (gethash resolved-target all-titles))
+                               (push resolved-target (gethash source adjacency))))))))
                    grove--cache)
+          
           (let (result)
             (maphash (lambda (title _) (push (cons title (gethash title adjacency)) result)) all-titles)
             result)))
