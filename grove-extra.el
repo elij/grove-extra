@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.2.9
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -67,6 +67,21 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
 (defcustom grove-extra-use-tab-line 't
   "When non-nil, enable a filtered tab-line showing only grove notes."
   :type 'boolean
+  :group 'grove-extra)
+
+(defcustom grove-graph-max-distance nil
+  "Maximum distance (in hops) for a local graph render.
+If nil, renders the entire graph. If an integer, graph starts at the current
+buffer's node and renders up to this many hops."
+  :type '(choice (const :tag "Entire graph" nil)
+                 (integer :tag "Hops"))
+  :group 'grove-extra)
+
+(defcustom grove-graph-tag-groups nil
+  "Alist mapping tags to hex colours for graph nodes.
+Each element should be of the form (TAG . \"#HEXCODE\").
+Nodes with matching tags will be rendered with the specified colour."
+  :type '(alist :key-type string :value-type string)
   :group 'grove-extra)
 
 ;; Graph State Variables
@@ -627,7 +642,41 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
           
           (let (result)
             (maphash (lambda (title _) (push (cons title (gethash title adjacency)) result)) all-titles)
-            result)))
+            (let ((max-hops (if (numberp current-prefix-arg) current-prefix-arg grove-graph-max-distance))
+                  (current-node nil))
+              (when (and max-hops (buffer-file-name) (grove-file-p (buffer-file-name)))
+                (let ((meta (gethash (buffer-file-name) grove--cache)))
+                  (setq current-node (plist-get meta :title))))
+              (if (and max-hops current-node (gethash current-node all-titles))
+                  (let ((visited (make-hash-table :test #'equal))
+                        (queue (list (cons current-node 0)))
+                        filtered-result)
+                    (puthash current-node t visited)
+                    ;; First, find all nodes within max-hops
+                    (while queue
+                      (let* ((item (pop queue))
+                             (node (car item))
+                             (depth (cdr item)))
+                        (when (< depth max-hops)
+                          (dolist (neighbor (gethash node adjacency))
+                            (unless (gethash neighbor visited)
+                              (puthash neighbor t visited)
+                              (setq queue (append queue (list (cons neighbor (1+ depth)))))))
+                          ;; Also add incoming links
+                          (maphash (lambda (src targets)
+                                     (when (and (member node targets)
+                                                (not (gethash src visited)))
+                                       (puthash src t visited)
+                                       (setq queue (append queue (list (cons src (1+ depth)))))))
+                                   adjacency))))
+                    ;; Second, build the filtered adjacency list
+                    (maphash (lambda (node _)
+                               (let ((targets (cl-remove-if-not (lambda (targ) (gethash targ visited))
+                                                                (gethash node adjacency))))
+                                 (push (cons node targets) filtered-result)))
+                             visited)
+                    filtered-result)
+                result)))))
     (funcall orig-fun)))
 
 (defun grove-extra-around-graph (orig-fun)

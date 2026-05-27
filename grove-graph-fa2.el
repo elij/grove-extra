@@ -42,6 +42,7 @@
 (defsubst fa2-dx (n) (aref n 3))
 (defsubst fa2-dy (n) (aref n 4))
 (defsubst fa2-mass (n) (aref n 5))
+(defsubst fa2-color (n) (aref n 6))
 
 (defsubst fa2-set-x (n v) (aset n 1 v))
 (defsubst fa2-set-y (n v) (aset n 2 v))
@@ -62,6 +63,21 @@
     (- (random 1000.0) 500.0)
     ))
 
+(defun grove-graph-fa2--node-color (title)
+  "Determine the node colour based on its tags and `grove-graph-tag-groups'."
+  (let ((color "#89b4fa"))
+    (when (boundp 'grove-graph-tag-groups)
+      (catch 'found
+        (maphash (lambda (_path meta)
+                   (when (equal (plist-get meta :title) title)
+                     (let ((tags (plist-get meta :tags)))
+                       (dolist (group grove-graph-tag-groups)
+                         (when (member (car group) tags)
+                           (setq color (cdr group))
+                           (throw 'found t))))))
+                 grove--cache)))
+    color))
+
 (defun grove-graph-fa2--init-sim (adjacency)
   "Initialise node arrays, edge tuples, and pre-compute the static mass matrix."
   (let ((node-list nil)
@@ -72,12 +88,12 @@
             (targets (cdr entry)))
         (unless (gethash source name-to-idx)
           (puthash source idx name-to-idx)
-          (push (vector source (grove-graph-fa2--hash-pos source "x") (grove-graph-fa2--hash-pos source "y") 0.0 0.0 (+ 1.0 (length targets))) node-list)
+          (push (vector source (grove-graph-fa2--hash-pos source "x") (grove-graph-fa2--hash-pos source "y") 0.0 0.0 (+ 1.0 (length targets)) (grove-graph-fa2--node-color source)) node-list)
           (cl-incf idx))
         (dolist (target targets)
           (unless (gethash target name-to-idx)
             (puthash target idx name-to-idx)
-            (push (vector target (grove-graph-fa2--hash-pos target "x") (grove-graph-fa2--hash-pos target "y") 0.0 0.0 2.0) node-list)
+            (push (vector target (grove-graph-fa2--hash-pos target "x") (grove-graph-fa2--hash-pos target "y") 0.0 0.0 2.0 (grove-graph-fa2--node-color target)) node-list)
             (cl-incf idx)))))
     
     (setq grove-graph-fa2--bg-nodes (vconcat (nreverse node-list)))
@@ -112,7 +128,10 @@
   (let* ((nodes grove-graph-fa2--bg-nodes)
          (edges grove-graph-fa2--bg-edges)
          (mass-matrix grove-graph-fa2--mass-matrix)
-         (len (length nodes))
+         (total-nodes (length nodes))
+         (len (if (< grove-graph-fa2--bg-frame 100)
+                  (max 1 (truncate (* total-nodes (/ (float (1+ grove-graph-fa2--bg-frame)) 100.0))))
+                total-nodes))
          (a (cl-the float (max 0.01 (- 1.0 (/ (float grove-graph-fa2--bg-frame) max-frames))))))
 
     (let ((gc-cons-threshold most-positive-fixnum))
@@ -121,7 +140,7 @@
         ;; Repulsion 
         (dotimes (i len)
           (let ((ni (aref nodes i))
-                (i-offset (* i len)))
+                (i-offset (* i total-nodes)))
             (cl-loop for j from (1+ i) below len do
                      (let* ((nj (aref nodes j))
                             (dx (cl-the float (- (fa2-x ni) (fa2-x nj))))
@@ -142,16 +161,17 @@
 
         ;; Attraction
         (dolist (edge edges)
-          (let* ((u (aref nodes (car edge)))
-                 (v (aref nodes (cdr edge)))
-                 (dx (cl-the float (- (fa2-x u) (fa2-x v))))
-                 (dy (cl-the float (- (fa2-y u) (fa2-y v))))
-                 (dist (cl-the float (max 0.1 (sqrt (+ (* dx dx) (* dy dy))))))
-                 (force (cl-the float (* a grove-graph-fa2--k-a (- dist grove-graph-fa2--target-dist)))))
-            (fa2-set-dx u (- (fa2-dx u) (* (/ dx dist) force)))
-            (fa2-set-dy u (- (fa2-dy u) (* (/ dy dist) force)))
-            (fa2-set-dx v (+ (fa2-dx v) (* (/ dx dist) force)))
-            (fa2-set-dy v (+ (fa2-dy v) (* (/ dy dist) force)))))
+          (when (and (< (car edge) len) (< (cdr edge) len))
+            (let* ((u (aref nodes (car edge)))
+                   (v (aref nodes (cdr edge)))
+                   (dx (cl-the float (- (fa2-x u) (fa2-x v))))
+                   (dy (cl-the float (- (fa2-y u) (fa2-y v))))
+                   (dist (cl-the float (max 0.1 (sqrt (+ (* dx dx) (* dy dy))))))
+                   (force (cl-the float (* a grove-graph-fa2--k-a (- dist grove-graph-fa2--target-dist)))))
+              (fa2-set-dx u (- (fa2-dx u) (* (/ dx dist) force)))
+              (fa2-set-dy u (- (fa2-dy u) (* (/ dy dist) force)))
+              (fa2-set-dx v (+ (fa2-dx v) (* (/ dx dist) force)))
+              (fa2-set-dy v (+ (fa2-dy v) (* (/ dy dist) force))))))
 
         ;; Integration
         (dotimes (i len)
@@ -204,13 +224,14 @@
           (insert "<svg viewBox=\"-" half-canvas " -" half-canvas " " canvas " " canvas "\" xmlns=\"http://www.w3.org/2000/svg\">\n")
           
           (dolist (edge edges)
-            (let ((u (aref nodes (car edge))) 
-                  (v (aref nodes (cdr edge))))
-              (insert "  <line x1=\"" (number-to-string (truncate (fa2-x u))) 
-                      "\" y1=\"" (number-to-string (truncate (fa2-y u))) 
-                      "\" x2=\"" (number-to-string (truncate (fa2-x v))) 
-                      "\" y2=\"" (number-to-string (truncate (fa2-y v))) 
-                      "\" stroke=\"#585b70\" stroke-width=\"2\" />\n")))
+            (when (and (< (car edge) len) (< (cdr edge) len))
+              (let ((u (aref nodes (car edge))) 
+                    (v (aref nodes (cdr edge))))
+                (insert "  <line x1=\"" (number-to-string (truncate (fa2-x u))) 
+                        "\" y1=\"" (number-to-string (truncate (fa2-y u))) 
+                        "\" x2=\"" (number-to-string (truncate (fa2-x v))) 
+                        "\" y2=\"" (number-to-string (truncate (fa2-y v))) 
+                        "\" stroke=\"#585b70\" stroke-width=\"2\" />\n"))))
           
           (dotimes (i len)
             (let* ((n (aref nodes i))
@@ -219,7 +240,7 @@
                    (ny-text (number-to-string (truncate (- (fa2-y n) 15.0)))))
               (insert "  <circle cx=\"" nx 
                       "\" cy=\"" ny 
-                      "\" r=\"10\" fill=\"#89b4fa\" />\n"
+                      "\" r=\"10\" fill=\"" (fa2-color n) "\" />\n"
                       "  <text x=\"" nx 
                       "\" y=\"" ny-text 
                       "\" fill=\"#cdd6f4\" font-size=\"10\" text-anchor=\"middle\">"
