@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.2.8
+;; Version: 0.2.9
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -64,6 +64,11 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
   :type 'boolean
   :group 'grove-extra)
 
+(defcustom grove-extra-use-tab-line 't
+  "When non-nil, enable a filtered tab-line showing only grove notes."
+  :type 'boolean
+  :group 'grove-extra)
+
 ;; Graph State Variables
 (defvar-local grove-graph--scale 1.0)
 (defvar-local grove-graph--raw-svg nil)
@@ -84,6 +89,16 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
 ;;;; ===========================================================================
 ;;;; CORE UTILITIES & PREDICATES
 ;;;; ===========================================================================
+
+(defun grove-extra--tab-line-buffers ()
+  "Return a list of grove note buffers for the tab-line, excluding sidebars."
+  (cl-remove-if-not
+   (lambda (buf)
+     (with-current-buffer buf
+       (and grove-mode
+            (not (derived-mode-p 'grove-graph-mode 'grove-tree-mode 'grove-capture-mode))
+            (not (string-prefix-p "*" (buffer-name buf))))))
+   (buffer-list)))
 
 (defun grove-extra--lock-sidebar-windows (&rest _)
   "Make Grove sidebar windows strongly dedicated to prevent buffer swapping."
@@ -125,7 +140,10 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
   (when (and grove-extra-mode
              (buffer-file-name)
              (grove-file-p (buffer-file-name)))
-    (grove-mode 1)))
+    (grove-mode 1)
+    (when grove-extra-use-tab-line
+      (setq-local tab-line-tabs-function #'grove-extra--tab-line-buffers)
+      (tab-line-mode 1))))
 
 (defun grove-extra--unescape-xml (str)
   "Restore standard characters from XML-escaped node names."
