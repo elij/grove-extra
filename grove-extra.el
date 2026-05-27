@@ -1,10 +1,11 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.2.7
+;; Version: 0.2.8
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
+(require 'calendar)
 (require 'grove)
 (require 'grove-core)
 (require 'grove-graph)
@@ -476,10 +477,10 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
           (when new-p
             (if (string= (file-name-extension path) "md")
                 (progn
-                  (insert "# " (format-time-string "%A, %B %e, %Y" t-val) "\n")
+                  (insert "# " (calendar-date-string (calendar-current-date)) "\n")
                   (insert "date: " (format-time-string "%F" t-val) "\n\n"))
               (progn
-                (insert "#+title: " (format-time-string "%A, %B %e, %Y" t-val) "\n")
+                (insert "#+title: " (calendar-date-string (calendar-current-date)) "\n")
                 (insert "#+date: " (format-time-string "%F" t-val) "\n\n")))
             (save-buffer))))
     (funcall orig-fun time)))
