@@ -903,7 +903,6 @@ Nodes with matching tags will be rendered with the specified colour."
 
 (defvar grove-extra-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map [mouse-movement] #'grove-extra--track-graph-mouse)
     map)
   "Global keymap for grove-extra-mode.")
 
