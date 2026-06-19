@@ -2,7 +2,7 @@
 
 This is an extension for [Grove](https://github.com/jonathanchu/grove).
 
-https://github.com/user-attachments/assets/c0070d8c-bfe4-48be-9620-65918107e41a
+https://github.com/user-attachments/assets/6bdd8aac-201b-49d2-82eb-4d555d665437
 
 Allows working in md/org, and implements mmdr support and built in fa2 rendering.
 
