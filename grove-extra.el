@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.3.0
+;; Version: 0.4.0
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -19,10 +19,6 @@
 
 ;; Try to load FA2 engine if available
 (require 'grove-graph-fa2 nil t)
-
-;;;; ===========================================================================
-;;;; CUSTOMISATIONS & VARIABLES
-;;;; ===========================================================================
 
 (defgroup grove-extra nil
   "Extra customisations for Grove."
@@ -84,7 +80,6 @@ Nodes with matching tags will be rendered with the specified colour."
   :type '(alist :key-type string :value-type string)
   :group 'grove-extra)
 
-;; Graph State Variables
 (defvar-local grove-graph--scale 1.0)
 (defvar-local grove-graph--raw-svg nil)
 (defvar-local grove-graph--current-frame 0)
@@ -98,12 +93,7 @@ Nodes with matching tags will be rendered with the specified colour."
 
 (defvar grove-extra--previous-track-mouse nil)
 
-;; Override the Link Regex to support Aliases globally
 (setq grove-link--regexp "\\[\\[\\([^]\n|]+\\)\\(?:|[^]\n]+\\|\\]\\[[^]\n]+\\)?\\]\\]")
-
-;;;; ===========================================================================
-;;;; CORE UTILITIES & PREDICATES
-;;;; ===========================================================================
 
 (defun grove-extra--tab-line-buffers ()
   "Return a list of grove note buffers for the tab-line, excluding sidebars."
@@ -172,21 +162,13 @@ Nodes with matching tags will be rendered with the specified colour."
   "Extracts node coordinates directly from the visual SVG text."
   (let ((nodes nil)
         (start 0))
-    ;; Rapidly find all pairs of <circle> and <text> tags in the frame
     (while (string-match "<circle cx=\"\\(-?[0-9]+\\)\" cy=\"\\(-?[0-9]+\\)\"[^>]*>[ \t\n\r]*<text[^>]*>\\([^<]+\\)</text>" svg-string start)
       (let ((name (grove-extra--unescape-xml (match-string 3 svg-string)))
             (x (string-to-number (match-string 1 svg-string)))
             (y (string-to-number (match-string 2 svg-string))))
-        ;; Pack into a vector mimicking the physics engine: [name x y]
         (push (vector name x y) nodes))
       (setq start (match-end 0)))
     (vconcat nodes)))
-
-;;;; ===========================================================================
-;;;; BUFFER-LOCAL MINOR MODES (UI & STATE)
-;;;; ===========================================================================
-
-;;; --- Graph Extension Mode ---
 
 (defvar grove-extra-graph-mode-map
   (let ((map (make-sparse-keymap)))
@@ -237,8 +219,6 @@ Nodes with matching tags will be rendered with the specified colour."
     (grove-extra-graph-mode 1)
     (setq-local track-mouse t)))
 
-;;; --- Capture Extension Mode ---
-
 (define-minor-mode grove-extra-capture-mode
   "Buffer-local minor mode for Grove Capture enhancements."
   :init-value nil
@@ -258,10 +238,6 @@ Nodes with matching tags will be rendered with the specified colour."
   "Turn on the extra capture features if the global mode is active."
   (when grove-extra-mode (grove-extra-capture-mode 1)))
 
-;;;; ===========================================================================
-;;;; AROUND ADVICE WRAPPERS (CORE LOGIC)
-;;;; ===========================================================================
-
 (defun grove-extra-around-file-p (orig-fun file)
   (if grove-extra-mode
       (and grove-directory file
@@ -270,34 +246,35 @@ Nodes with matching tags will be rendered with the specified colour."
     (funcall orig-fun file)))
 
 (defun grove-extra-around-parse-note (orig-fun file)
+  "Parse note with markdown support
+
+  1. Skip obsidian style frontmatter
+  2. Grab org or markdown
+  3. Use fallback if title not found
+  4. Grab tags
+  5. Grab links"
   (if grove-extra-mode
       (let ((mtime (file-attribute-modification-time (file-attributes file)))
             title tags links)
         (with-temp-buffer
           (insert-file-contents file)
           
-          ;; 1. Extract Title
           (goto-char (point-min))
-          ;; Prioritise explicit metadata (YAML 'title:' or Org '#+title:')
           (if (re-search-forward "^\\(?:#\\+title:\\|title:\\)\\s-*\\(.+\\)" nil t)
               (setq title (string-trim (match-string 1) "[ \t\n\r\"]+"))
             
-            ;; Otherwise, skip the frontmatter block
             (goto-char (point-min))
             (when (looking-at-p "^---[ \t]*$")
               (forward-line 1)
               (when (re-search-forward "^---[ \t]*$" nil t)
                 (forward-line 1)))
             
-            ;; And grab the first Markdown or Org heading
             (when (re-search-forward "^\\(?:#+\\|\\*+\\)[ \t]+\\(.*\\)" nil t)
               (setq title (string-trim (match-string 1) "[ \t\n\r\"]+"))))
           
-          ;; Fallback: Guarantee a title string to prevent 'nil' crashes globally
           (unless title
             (setq title (file-name-sans-extension (file-name-nondirectory file))))
           
-          ;; 2. Extract Tags
           (goto-char (point-min))
           (when (re-search-forward "^\\(?:#\\+filetags:\\|tags:\\)\\s-*\\(.+\\)" nil t)
             (let ((raw-tags (match-string 1)))
@@ -305,7 +282,6 @@ Nodes with matching tags will be rendered with the specified colour."
               (setq tags (split-string raw-tags "[:,]\\s-*" t "\\s-*"))))
           (setq tags (grove--merge-tags tags (grove--collect-inline-tags)))
           
-          ;; 3. Extract Links
           (goto-char (point-min))
           (while (re-search-forward grove-link--regexp nil t)
             (let ((target (match-string-no-properties 1)))
@@ -611,14 +587,12 @@ Nodes with matching tags will be rendered with the specified colour."
               (all-titles (make-hash-table :test #'equal))
               (resolution-map (make-hash-table :test #'equal)))
           
-          ;; First Pass: Safely populate the maps
           (maphash (lambda (path meta)
                      (let* ((title (plist-get meta :title))
                             (rel-path (file-relative-name path grove-directory))
                             (rel-no-ext (file-name-sans-extension rel-path))
                             (filename-no-ext (file-name-sans-extension (file-name-nondirectory path))))
                        
-                       ;; Only attempt to hash and downcase if the title is actually text
                        (when (stringp title)
                          (puthash title t all-titles)
                          (puthash (downcase title) title resolution-map)
@@ -628,12 +602,10 @@ Nodes with matching tags will be rendered with the specified colour."
                            (puthash (downcase filename-no-ext) title resolution-map)))))
                    grove--cache)
           
-          ;; Second Pass: Safely map the links
           (maphash (lambda (_path meta)
                      (let ((source (plist-get meta :title))
                            (links (plist-get meta :links)))
                        (dolist (raw-target links)
-                         ;; CRITICAL: Ensure the target link isn't empty before downcasing
                          (when (stringp raw-target)
                            (let ((resolved-target (gethash (downcase raw-target) resolution-map)))
                              (when (and resolved-target (gethash resolved-target all-titles))
@@ -652,7 +624,6 @@ Nodes with matching tags will be rendered with the specified colour."
                         (queue (list (cons current-node 0)))
                         filtered-result)
                     (puthash current-node t visited)
-                    ;; First, find all nodes within max-hops
                     (while queue
                       (let* ((item (pop queue))
                              (node (car item))
@@ -662,14 +633,12 @@ Nodes with matching tags will be rendered with the specified colour."
                             (unless (gethash neighbor visited)
                               (puthash neighbor t visited)
                               (setq queue (append queue (list (cons neighbor (1+ depth)))))))
-                          ;; Also add incoming links
                           (maphash (lambda (src targets)
                                      (when (and (member node targets)
                                                 (not (gethash src visited)))
                                        (puthash src t visited)
                                        (setq queue (append queue (list (cons src (1+ depth)))))))
                                    adjacency))))
-                    ;; Second, build the filtered adjacency list
                     (maphash (lambda (node _)
                                (let ((targets (cl-remove-if-not (lambda (targ) (gethash targ visited))
                                                                 (gethash node adjacency))))
@@ -740,7 +709,6 @@ Nodes with matching tags will be rendered with the specified colour."
         (clear-image-cache)
         (put-text-property (point-min) (point-max) 'display (create-image encoded-svg 'svg t))
         
-        ;; Ensure the cursor survives the 60fps animation redraw loop
         (when grove-extra--hovered-node
           (put-text-property (point-min) (point-max) 'pointer 'hand))))))
 
@@ -794,54 +762,38 @@ Nodes with matching tags will be rendered with the specified colour."
   (grove-graph--update-display))
 
 (defun grove-extra--graph-node-at-pos (posn)
-  "Helper function: returns the node name at POSN in the graph, or nil."
-  (let* ((window (posn-window posn))
-         (win-xy (posn-x-y posn)))
+  "Finds the graph node under the mouse POSN using fast native image scaling."
+  (let* ((image-coords (posn-object-x-y posn))
+         (image-size (posn-object-width-height posn))) 
     
-    (when (and window win-xy)
-      (with-current-buffer (window-buffer window)
+    (when (and image-coords image-size)
+      (with-current-buffer (window-buffer (posn-window posn))
         
-        ;; --- LAZY EVALUATION: Only re-parse if the visual frame changes ---
         (unless (eq grove-graph--raw-svg grove-extra--parsed-svg-string)
           (setq grove-extra--parsed-svg-nodes (grove-extra--parse-fa2-svg grove-graph--raw-svg))
           (setq grove-extra--parsed-svg-string grove-graph--raw-svg))
         
-        (let* ((px (car win-xy))
-               (py (cdr win-xy))
-               (scale (or grove-graph--scale 1.0))
+        (let* ((img-w (float (car image-size)))
+               (scale (/ grove-graph-fa2--canvas-size img-w))
                
-               (img-w (float (max 100 (truncate (* (window-pixel-width window) scale)))))
-               (img-h (float (max 100 (truncate (* (window-pixel-height window) scale)))))
+               (mouse-x (* (car image-coords) scale))
+               (mouse-y (* (cdr image-coords) scale))
                
-               (canvas-size grove-graph-fa2--canvas-size)
-               (half-canvas (/ canvas-size 2.0))
-               
-               (min-dim (min img-w img-h))
-               (pad-x (/ (- img-w min-dim) 2.0))
-               (pad-y (/ (- img-h min-dim) 2.0))
-               
-               (graph-px (- px pad-x))
-               (graph-py (- py pad-y))
-               
-               (uniform-scale (/ canvas-size min-dim))
-               (svg-x (- (* graph-px uniform-scale) half-canvas))
-               (svg-y (- (* graph-py uniform-scale) half-canvas))
-               
-               ;; --- USE THE VISUAL DATA INSTEAD OF THE PHYSICS ENGINE ---
                (nodes grove-extra--parsed-svg-nodes)
                (len (if nodes (length nodes) 0))
                (closest-node nil)
-               (min-dist-sq 144.0))
-
+               (min-dist-sq 100.0))
+          
           (dotimes (i len)
             (let* ((n (aref nodes i))
-                   ;; Uses fa2-x and fa2-y accessors natively
-                   (dx (- svg-x (fa2-x n)))
-                   (dy (- svg-y (fa2-y n)))
+                   (dx (- mouse-x (fa2-x n)))
+                   (dy (- mouse-y (fa2-y n)))
                    (dist-sq (+ (* dx dx) (* dy dy))))
+              
               (when (< dist-sq min-dist-sq)
                 (setq min-dist-sq dist-sq)
                 (setq closest-node (fa2-name n)))))
+          
           closest-node)))))
 
 (defun grove-extra--track-graph-mouse (event)
@@ -889,17 +841,11 @@ Nodes with matching tags will be rendered with the specified colour."
 (defun grove-extra--resolve-node-to-file (node)
   "Resolve a NODE name to an absolute file path using Grove's internal logic."
   (if (fboundp 'grove-link--resolve)
-      ;; Tap directly into the core grove: link resolution algorithm
       (grove-link--resolve node)
-    ;; Robust fallback: recursively search the vault for a matching filename
     (let ((files (directory-files-recursively grove-directory (format "^%s\\." (regexp-quote node)))))
       (if files
           (car files)
         (expand-file-name (format "%s.md" node) grove-directory)))))
-
-;;;; ===========================================================================
-;;;; GLOBAL MINOR MODE DEFINITION
-;;;; ===========================================================================
 
 (defvar grove-extra-mode-map
   (let ((map (make-sparse-keymap)))
@@ -916,12 +862,10 @@ Nodes with matching tags will be rendered with the specified colour."
         (setq grove-extra--previous-track-mouse (default-value 'track-mouse))
         (setq-default track-mouse t)
         
-        ;; 1. Activate Hooks
         (add-hook 'grove-graph-mode-hook #'grove-extra--enable-graph-mode)
         (add-hook 'grove-capture-mode-hook #'grove-extra--enable-capture-mode)
         (add-hook 'find-file-hook #'grove-extra--turn-on-hook)
         
-        ;; 2. Apply Advice Wrappers
         (advice-add 'grove--parse-note :around #'grove-extra-around-parse-note)
         (advice-add 'grove--refresh-cache :around #'grove-extra-around-refresh-cache)
         (advice-add 'grove-file-p :around #'grove-extra-around-file-p)
@@ -948,12 +892,10 @@ Nodes with matching tags will be rendered with the specified colour."
     (progn
       (setq-default track-mouse grove-extra--previous-track-mouse)
       
-      ;; 1. Deactivate Hooks
       (remove-hook 'grove-graph-mode-hook #'grove-extra--enable-graph-mode)
       (remove-hook 'grove-capture-mode-hook #'grove-extra--enable-capture-mode)
       (remove-hook 'find-file-hook #'grove-extra--turn-on-hook)
       
-      ;; 2. Remove Advice Wrappers
       (advice-remove 'grove--parse-note #'grove-extra-around-parse-note)
       (advice-remove 'grove--refresh-cache #'grove-extra-around-refresh-cache)
       (advice-remove 'grove-file-p #'grove-extra-around-file-p)
