@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.4.0
+;; Version: 0.4.1
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -762,39 +762,59 @@ Nodes with matching tags will be rendered with the specified colour."
   (grove-graph--update-display))
 
 (defun grove-extra--graph-node-at-pos (posn)
-  "Finds the graph node under the mouse POSN using fast native image scaling."
+  "Finds the graph node under the mouse POSN"
   (let* ((image-coords (posn-object-x-y posn))
          (image-size (posn-object-width-height posn))) 
-    
+
     (when (and image-coords image-size)
       (with-current-buffer (window-buffer (posn-window posn))
         
         (unless (eq grove-graph--raw-svg grove-extra--parsed-svg-string)
-          (setq grove-extra--parsed-svg-nodes (grove-extra--parse-fa2-svg grove-graph--raw-svg))
-          (setq grove-extra--parsed-svg-string grove-graph--raw-svg))
+          (let ((nodes nil)
+                (start 0))
+            (while (string-match "<circle cx=\"\\([0-9.-]+\\)\" cy=\"\\([0-9.-]+\\)\"[^>]*data-name=\"\\([^\"]+\\)\"" grove-graph--raw-svg start)
+              (push (vector (string-to-number (match-string 1 grove-graph--raw-svg))
+                            (string-to-number (match-string 2 grove-graph--raw-svg))
+                            (match-string 3 grove-graph--raw-svg))
+                    nodes)
+              (setq start (match-end 0)))
+            (setq grove-extra--parsed-svg-nodes (vconcat nodes))
+            (setq grove-extra--parsed-svg-string grove-graph--raw-svg)))
         
-        (let* ((img-w (float (car image-size)))
-               (scale (/ grove-graph-fa2--canvas-size img-w))
+        (let* ((img-w (max 1.0 (float (car image-size))))
+               (img-h (max 1.0 (float (cdr image-size))))
                
-               (mouse-x (* (car image-coords) scale))
-               (mouse-y (* (cdr image-coords) scale))
+               (min-dim (min img-w img-h))
+               (pad-x (/ (- img-w min-dim) 2.0))
+               (pad-y (/ (- img-h min-dim) 2.0))
                
-               (nodes grove-extra--parsed-svg-nodes)
-               (len (if nodes (length nodes) 0))
-               (closest-node nil)
-               (min-dist-sq 100.0))
+               (active-x (- (car image-coords) pad-x))
+               (active-y (- (cdr image-coords) pad-y)))
           
-          (dotimes (i len)
-            (let* ((n (aref nodes i))
-                   (dx (- mouse-x (fa2-x n)))
-                   (dy (- mouse-y (fa2-y n)))
-                   (dist-sq (+ (* dx dx) (* dy dy))))
+          (when (and (>= active-x 0) (<= active-x min-dim)
+                     (>= active-y 0) (<= active-y min-dim))
+            
+            (let* ((scale (/ grove-graph-fa2--canvas-size min-dim))
+                   (mouse-x (* active-x scale))
+                   (mouse-y (* active-y scale))
+                   (nodes grove-extra--parsed-svg-nodes)
+                   (len (if nodes (length nodes) 0))
+                   (closest-node nil)
+                   (min-dist-sq 100.0))
               
-              (when (< dist-sq min-dist-sq)
-                (setq min-dist-sq dist-sq)
-                (setq closest-node (fa2-name n)))))
-          
-          closest-node)))))
+              (dotimes (i len)
+                (let* ((n (aref nodes i))
+                       (nx (aref n 0))
+                       (ny (aref n 1))
+                       (dx (- mouse-x nx))
+                       (dy (- mouse-y ny))
+                       (dist-sq (+ (* dx dx) (* dy dy))))
+                  
+                  (when (< dist-sq min-dist-sq)
+                    (setq min-dist-sq dist-sq)
+                    (setq closest-node (aref n 2)))))
+              
+              closest-node)))))))
 
 (defun grove-extra--track-graph-mouse (event)
   "Display the hovered node name globally and swap cursor to a hand icon."

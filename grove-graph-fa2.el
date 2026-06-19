@@ -310,7 +310,7 @@
                    (line-height 12)
                    (start-y (- ny-int 15 (* (1- (length lines)) (/ line-height 2)))))
               
-              (insert "  <circle cx=\"" nx "\" cy=\"" ny "\" r=\"10\" fill=\"" (fa2-color n) "\" />\n")
+              (insert "  <circle cx=\"" nx "\" cy=\"" ny "\" r=\"10\" fill=\"" (fa2-color n) "\" data-name=\"" name-escaped "\" />\n")
               
               (insert "  <text fill=\"#cdd6f4\" font-size=\"10\" text-anchor=\"middle\">\n")
               (let ((curr-y start-y))
