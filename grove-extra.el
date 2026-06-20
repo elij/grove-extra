@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.4.2
+;; Version: 0.4.3
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -18,7 +18,7 @@
 (require 'json)
 
 ;; Try to load FA2 engine if available
-(require 'grove-graph-fa2 nil t)
+(require 'graph-fa2 nil t)
 
 (defgroup grove-extra nil
   "Extra customisations for Grove."
@@ -82,11 +82,6 @@ Nodes with matching tags will be rendered with the specified colour."
 
 (defvar-local grove-graph--scale 1.0)
 (defvar-local grove-graph--raw-svg nil)
-(defvar-local grove-graph--current-frame 0)
-(defvar-local grove-graph--smil-timer nil)
-(defvar-local grove-graph--frame-vector nil)
-(defvar-local grove-graph--playback-buffer nil)
-(defvar-local grove-graph--frame-offsets nil)
 (defvar-local grove-extra--hovered-node nil)
 (defvar-local grove-extra--parsed-svg-string nil)
 (defvar-local grove-extra--parsed-svg-nodes nil)
@@ -185,12 +180,19 @@ Nodes with matching tags will be rendered with the specified colour."
     map)
   "Keymap overriding `grove-graph-mode-map` with zooming and mouse tools.")
 
+(defun grove-extra--after-graph-fa2-render ()
+  "Apply scaling and pointers to the graph-fa2 output."
+  (when (and (boundp 'graph-fa2--current-svg) graph-fa2--current-svg)
+    (setq-local grove-graph--raw-svg graph-fa2--current-svg)
+    (grove-graph--update-display)))
+
 (defun grove-extra--graph-cleanup ()
   "Clean up playback buffers and timers when the graph is closed."
-  (when (buffer-live-p grove-graph--playback-buffer)
-    (kill-buffer grove-graph--playback-buffer))
-  (when (fboundp 'grove-graph--smil-stop)
-    (grove-graph--smil-stop)))
+  (when (fboundp 'graph-fa2--player-stop)
+    (graph-fa2--player-stop))
+  (when (and (boundp 'graph-fa2--playback-buffer)
+             (buffer-live-p graph-fa2--playback-buffer))
+    (kill-buffer graph-fa2--playback-buffer)))
 
 (define-minor-mode grove-extra-graph-mode
   "Buffer-local minor mode for Grove Graph UI enhancements."
@@ -747,7 +749,7 @@ structures and start the engine."
           (with-current-buffer buf
             (grove-graph-mode)
             (grove-extra--enable-graph-mode)
-            (when (fboundp 'grove-graph--smil-stop) (grove-graph--smil-stop))
+            (when (fboundp 'graph-fa2--player-stop) (graph-fa2--player-stop))
             (setq-local grove-graph--scale (if (eq grove-graph-renderer 'fa2) 1.0 grove-graph-default-zoom))
             (let ((inhibit-read-only t)) (erase-buffer)))
           (let ((win (display-buffer-in-side-window
@@ -762,7 +764,7 @@ structures and start the engine."
               (let* ((prepared (grove-extra--prepare-graph-data adjacency))
                      (nodes (plist-get prepared :nodes))
                      (edges (plist-get prepared :edges)))
-                (grove-graph-fa2-start buf nodes edges :cache-dir (expand-file-name ".cache" grove-directory)))
+                (graph-fa2-start buf nodes edges :cache-dir (expand-file-name ".cache" grove-directory)))
             (let* ((markup (if (eq grove-graph-renderer 'mmdr)
                                (grove-graph--generate-mermaid adjacency)
                              (grove-graph--generate-dot adjacency)))
@@ -798,40 +800,6 @@ structures and start the engine."
         
         (when grove-extra--hovered-node
           (put-text-property (point-min) (point-max) 'pointer 'hand))))))
-
-(defun grove-graph--smil-start ()
-  "Starts the animation playback loop if frames are populated."
-  (when (or grove-graph--frame-vector grove-graph--frame-offsets)
-    (unless grove-graph--smil-timer
-      (setq grove-graph--smil-timer (run-with-timer 0 0.016 #'grove-graph--smil-update)))))
-
-(defun grove-graph--smil-stop ()
-  "Halts the animation loop."
-  (when grove-graph--smil-timer
-    (cancel-timer grove-graph--smil-timer)
-    (setq grove-graph--smil-timer nil)))
-
-(defun grove-graph--smil-update ()
-  "Advances the animation frame natively from either RAM or hidden buffers."
-  (let ((graph-buf (get-buffer "*grove-graph*")))
-    (when (buffer-live-p graph-buf)
-      (with-current-buffer graph-buf
-        (let ((total-frames (or (and grove-graph--frame-offsets (length grove-graph--frame-offsets))
-                                (and grove-graph--frame-vector (length grove-graph--frame-vector))
-                                0)))
-          (when (> total-frames 0)
-            (if (< grove-graph--current-frame total-frames)
-                (progn
-                  (let ((bounds (when grove-graph--frame-offsets 
-                                  (aref grove-graph--frame-offsets grove-graph--current-frame))))
-                    (setq grove-graph--raw-svg
-                          (if bounds
-                              (with-current-buffer grove-graph--playback-buffer
-                                (buffer-substring-no-properties (car bounds) (cdr bounds)))
-                            (aref grove-graph--frame-vector grove-graph--current-frame))))
-                  (grove-graph--update-display)
-                  (cl-incf grove-graph--current-frame))
-              (grove-graph--smil-stop))))))))
 
 (defun grove-graph-zoom-in ()
   (interactive)
@@ -881,7 +849,7 @@ structures and start the engine."
           (when (and (>= active-x 0) (<= active-x min-dim)
                      (>= active-y 0) (<= active-y min-dim))
             
-            (let* ((scale (/ grove-graph-fa2--canvas-size min-dim))
+            (let* ((scale (/ 500.0 min-dim))
                    (mouse-x (* active-x scale))
                    (mouse-y (* active-y scale))
                    (nodes grove-extra--parsed-svg-nodes)
@@ -974,6 +942,7 @@ handling entirely to graph-fa2-click-node."
         (add-hook 'grove-capture-mode-hook #'grove-extra--enable-capture-mode)
         (add-hook 'find-file-hook #'grove-extra--turn-on-hook)
         (add-hook 'graph-fa2-node-clicked-functions #'grove-extra--handle-node-clicked)
+        (add-hook 'graph-fa2-after-render-functions #'grove-extra--after-graph-fa2-render)
         
         (advice-add 'grove--parse-note :around #'grove-extra-around-parse-note)
         (advice-add 'grove--refresh-cache :around #'grove-extra-around-refresh-cache)
@@ -1005,6 +974,7 @@ handling entirely to graph-fa2-click-node."
       (remove-hook 'grove-capture-mode-hook #'grove-extra--enable-capture-mode)
       (remove-hook 'find-file-hook #'grove-extra--turn-on-hook)
       (remove-hook 'graph-fa2-node-clicked-functions #'grove-extra--handle-node-clicked)
+      (remove-hook 'graph-fa2-after-render-functions #'grove-extra--after-graph-fa2-render)
       
       (advice-remove 'grove--parse-note #'grove-extra-around-parse-note)
       (advice-remove 'grove--refresh-cache #'grove-extra-around-refresh-cache)
