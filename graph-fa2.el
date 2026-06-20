@@ -599,8 +599,9 @@ Synchronise buffers to state and trigger background rendering."
                         graph-fa2--playback-buffer
                         (buffer-live-p graph-fa2--playback-buffer)
                         graph-fa2--frame-offsets)
-                   (with-current-buffer graph-fa2--playback-buffer
-                     (let ((bounds (aref graph-fa2--frame-offsets graph-fa2--current-frame)))
+                   (let* ((clamped-frame (max 0 (min graph-fa2--current-frame (1- (length graph-fa2--frame-offsets)))))
+                          (bounds (aref graph-fa2--frame-offsets clamped-frame)))
+                     (with-current-buffer graph-fa2--playback-buffer
                        (buffer-substring-no-properties (car bounds) (cdr bounds))))
                  (and (boundp 'graph-fa2--current-svg) graph-fa2--current-svg))))
           
