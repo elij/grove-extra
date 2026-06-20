@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.4.1
+;; Version: 0.4.2
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -152,10 +152,10 @@ Nodes with matching tags will be rendered with the specified colour."
 
 (defun grove-extra--unescape-xml (str)
   "Restore standard characters from XML-escaped node names."
-  (let ((s (replace-regexp-in-string "&quot;" "\"" str)))
-    (setq s (replace-regexp-in-string "&gt;" ">" s))
-    (setq s (replace-regexp-in-string "&lt;" "<" s))
-    (setq s (replace-regexp-in-string "&amp;" "&" s))
+  (let ((s (replace-regexp-in-string "&quot;" "\"" str t t)))
+    (setq s (replace-regexp-in-string "&gt;" ">" s t t))
+    (setq s (replace-regexp-in-string "&lt;" "<" s t t))
+    (setq s (replace-regexp-in-string "&amp;" "&" s t t))
     s))
 
 (defun grove-extra--parse-fa2-svg (svg-string)
@@ -648,7 +648,96 @@ Nodes with matching tags will be rendered with the specified colour."
                 result)))))
     (funcall orig-fun)))
 
+(defun grove-extra--get-node-colour (tags)
+  "Determine the node colour based on TAGS and grove-graph-tag-groups."
+  (let ((colour "#89b4fa"))
+    (when (and (boundp 'grove-graph-tag-groups) grove-graph-tag-groups)
+      (catch 'found
+        (dolist (group grove-graph-tag-groups)
+          (when (member (car group) tags)
+            (setq colour (cdr group))
+            (throw 'found t)))))
+    colour))
+
+(defun grove-extra--prepare-graph-data (adjacency)
+  "Iterate over cache and build plain nodes and edges for the graph engine."
+  (let ((backlink-counts (make-hash-table :test #'equal))
+        (resolution-map (make-hash-table :test #'equal))
+        (title-to-meta (make-hash-table :test #'equal))
+        (unique-titles (make-hash-table :test #'equal))
+        (nodes nil)
+        (edges nil))
+    (maphash (lambda (path meta)
+               (let* ((title (plist-get meta :title))
+                      (rel-path (file-relative-name path grove-directory))
+                      (rel-no-ext (file-name-sans-extension rel-path))
+                      (filename-no-ext (file-name-sans-extension (file-name-nondirectory path))))
+                 (when (stringp title)
+                   (puthash title meta title-to-meta)
+                   (puthash (downcase title) title resolution-map)
+                   (when (stringp rel-path)
+                     (puthash (downcase rel-path) title resolution-map)
+                     (puthash (downcase rel-no-ext) title resolution-map)
+                     (puthash (downcase filename-no-ext) title resolution-map)))))
+             grove--cache)
+    (maphash (lambda (_path meta)
+               (let ((links (plist-get meta :links)))
+                 (dolist (link links)
+                   (when (stringp link)
+                     (let ((resolved-title (gethash (downcase link) resolution-map)))
+                       (when resolved-title
+                         (puthash resolved-title (1+ (gethash resolved-title backlink-counts 0)) backlink-counts)))))))
+             grove--cache)
+    (dolist (entry adjacency)
+      (let ((src (car entry))
+            (tgts (cdr entry)))
+        (puthash src t unique-titles)
+        (dolist (tgt tgts)
+          (puthash tgt t unique-titles)
+          (push (cons src tgt) edges))))
+    (maphash (lambda (title _)
+               (let* ((meta (gethash title title-to-meta))
+                      (tags (when meta (plist-get meta :tags)))
+                      (colour (grove-extra--get-node-colour tags))
+                      (bl-count (gethash title backlink-counts 0))
+                      (radius (+ 10.0 (* 2.0 bl-count))))
+                 (push (list :id title :colour colour :radius radius :label title) nodes)))
+             unique-titles)
+    (list :nodes (nreverse nodes) :edges (nreverse edges))))
+
+(defun grove-extra--resolve-node-file-with-fallbacks (node-id)
+  "Resolve NODE-ID to a file path using a fallback sequence of Denote, Org-roam, and Grove."
+  (let (found-file)
+    (when (and (fboundp 'denote-directory) (fboundp 'denote-get-path-by-id))
+      (let ((files (directory-files-recursively (denote-directory) (regexp-quote node-id))))
+        (when files
+          (setq found-file (car files)))))
+    (when (and (not found-file) (fboundp 'org-roam-db-query))
+      (let ((res (org-roam-db-query [:select [file] :from nodes :where (= title $s1)] node-id)))
+        (when res
+          (setq found-file (caar res)))))
+    (unless found-file
+      (setq found-file (grove-extra--resolve-node-to-file node-id)))
+    found-file))
+
+(defun grove-extra--handle-node-clicked (node-id)
+  "Handle a clicked node callback by opening its corresponding file in the main window."
+  (let* ((target-file (grove-extra--resolve-node-file-with-fallbacks node-id))
+         (graph-win (get-buffer-window "*grove-graph*"))
+         (main-win (or (grove-tree--main-window) (and graph-win (next-window graph-win)) (selected-window))))
+    (if target-file
+        (run-at-time 0 nil
+                     (lambda (win file name)
+                       (when (window-live-p win)
+                         (select-window win))
+                       (find-file file)
+                       (message "Opened: %s" name))
+                     main-win target-file node-id))))
+
 (defun grove-extra-around-graph (orig-fun)
+  "Build the graph and dock it into a dedicated sidebar window.
+If the animated ForceAtlas2 physics engine is active, prepare the generic data
+structures and start the engine."
   (if grove-extra-mode
       (progn
         (grove--ensure-directory)
@@ -657,14 +746,10 @@ Nodes with matching tags will be rendered with the specified colour."
                (buf (get-buffer-create "*grove-graph*")))
           (with-current-buffer buf
             (grove-graph-mode)
-            
             (grove-extra--enable-graph-mode)
-            
             (when (fboundp 'grove-graph--smil-stop) (grove-graph--smil-stop))
             (setq-local grove-graph--scale (if (eq grove-graph-renderer 'fa2) 1.0 grove-graph-default-zoom))
             (let ((inhibit-read-only t)) (erase-buffer)))
-          
-          ;; --- NEW: Dock into a dedicated sidebar ---
           (let ((win (display-buffer-in-side-window
                       buf
                       `((side . right)
@@ -673,9 +758,11 @@ Nodes with matching tags will be rendered with the specified colour."
                         (window-parameters . ((no-other-window . nil)
                                               (no-delete-other-windows . t)))))))
             (when win (window-preserve-size win t t)))
-          
           (if (eq grove-graph-renderer 'fa2)
-              (grove-graph-fa2-start buf adjacency)
+              (let* ((prepared (grove-extra--prepare-graph-data adjacency))
+                     (nodes (plist-get prepared :nodes))
+                     (edges (plist-get prepared :edges)))
+                (grove-graph-fa2-start buf nodes edges :cache-dir (expand-file-name ".cache" grove-directory)))
             (let* ((markup (if (eq grove-graph-renderer 'mmdr)
                                (grove-graph--generate-mermaid adjacency)
                              (grove-graph--generate-dot adjacency)))
@@ -775,7 +862,7 @@ Nodes with matching tags will be rendered with the specified colour."
             (while (string-match "<circle cx=\"\\([0-9.-]+\\)\" cy=\"\\([0-9.-]+\\)\"[^>]*data-name=\"\\([^\"]+\\)\"" grove-graph--raw-svg start)
               (push (vector (string-to-number (match-string 1 grove-graph--raw-svg))
                             (string-to-number (match-string 2 grove-graph--raw-svg))
-                            (match-string 3 grove-graph--raw-svg))
+                            (grove-extra--unescape-xml (match-string 3 grove-graph--raw-svg)))
                     nodes)
               (setq start (match-end 0)))
             (setq grove-extra--parsed-svg-nodes (vconcat nodes))
@@ -800,7 +887,7 @@ Nodes with matching tags will be rendered with the specified colour."
                    (nodes grove-extra--parsed-svg-nodes)
                    (len (if nodes (length nodes) 0))
                    (closest-node nil)
-                   (min-dist-sq 100.0))
+                   (min-dist-sq 900.0))
               
               (dotimes (i len)
                 (let* ((n (aref nodes i))
@@ -831,32 +918,33 @@ Nodes with matching tags will be rendered with the specified colour."
           
           (if node
               (progn
-                (message "Node: %s" node)
                 (put-text-property (point-min) (point-max) 'pointer 'hand))
             (progn
-              (message nil)
               (put-text-property (point-min) (point-max) 'pointer nil))))))))
 
 (defun grove-extra--click-graph-node (event)
-  "Open the clicked node in the main editor window safely."
+  "Open the clicked node in the main editor window safely.
+If the ForceAtlas2 animated physics engine is active, delegate the click
+handling entirely to graph-fa2-click-node."
   (interactive "e")
-  
-  (let* ((posn (event-start event))
-         (window (posn-window posn)))
-    (when (and (window-live-p window)
-               (equal (buffer-name (window-buffer window)) "*grove-graph*"))
-      (with-current-buffer (window-buffer window)
-        (let ((node (grove-extra--graph-node-at-pos posn)))
-          (when node
-            (let* ((main-win (or (grove-tree--main-window) (next-window window)))
-                   (target-file (grove-extra--resolve-node-to-file node)))
-              (run-at-time 0 nil
-                           (lambda (win file node-name)
-                             (when (window-live-p win)
-                               (select-window win))
-                             (find-file file)
-                             (message "Opened: %s" node-name))
-                           main-win target-file node))))))))
+  (if (eq grove-graph-renderer 'fa2)
+      (graph-fa2-click-node event)
+    (let* ((posn (event-start event))
+           (window (posn-window posn)))
+      (when (and (window-live-p window)
+                 (equal (buffer-name (window-buffer window)) "*grove-graph*"))
+        (with-current-buffer (window-buffer window)
+          (let ((node (grove-extra--graph-node-at-pos posn)))
+            (when node
+              (let* ((main-win (or (grove-tree--main-window) (next-window window)))
+                     (target-file (grove-extra--resolve-node-to-file node)))
+                (run-at-time 0 nil
+                             (lambda (win file node-name)
+                               (when (window-live-p win)
+                                 (select-window win))
+                               (find-file file)
+                               (message "Opened: %s" node-name))
+                             main-win target-file node)))))))))
 
 (defun grove-extra--resolve-node-to-file (node)
   "Resolve a NODE name to an absolute file path using Grove's internal logic."
@@ -885,6 +973,7 @@ Nodes with matching tags will be rendered with the specified colour."
         (add-hook 'grove-graph-mode-hook #'grove-extra--enable-graph-mode)
         (add-hook 'grove-capture-mode-hook #'grove-extra--enable-capture-mode)
         (add-hook 'find-file-hook #'grove-extra--turn-on-hook)
+        (add-hook 'graph-fa2-node-clicked-functions #'grove-extra--handle-node-clicked)
         
         (advice-add 'grove--parse-note :around #'grove-extra-around-parse-note)
         (advice-add 'grove--refresh-cache :around #'grove-extra-around-refresh-cache)
@@ -915,6 +1004,7 @@ Nodes with matching tags will be rendered with the specified colour."
       (remove-hook 'grove-graph-mode-hook #'grove-extra--enable-graph-mode)
       (remove-hook 'grove-capture-mode-hook #'grove-extra--enable-capture-mode)
       (remove-hook 'find-file-hook #'grove-extra--turn-on-hook)
+      (remove-hook 'graph-fa2-node-clicked-functions #'grove-extra--handle-node-clicked)
       
       (advice-remove 'grove--parse-note #'grove-extra-around-parse-note)
       (advice-remove 'grove--refresh-cache #'grove-extra-around-refresh-cache)
