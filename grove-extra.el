@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.4.4
+;; Version: 0.4.6
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -18,7 +18,7 @@
 (require 'json)
 
 ;; Try to load FA2 engine if available
-(require 'graph-fa2 nil t)
+(require 'graph-fa2)
 
 (defgroup grove-extra nil
   "Extra customisations for Grove."
@@ -55,11 +55,6 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
   :type 'float
   :group 'grove-extra)
 
-(defcustom grove-graph-deterministic-positions nil
-  "When non-nil, use a deterministic seed for node positions based on string and offset."
-  :type 'boolean
-  :group 'grove-extra)
-
 (defcustom grove-extra-use-tab-line 't
   "When non-nil, enable a filtered tab-line showing only grove notes."
   :type 'boolean
@@ -83,10 +78,11 @@ Nodes with matching tags will be rendered with the specified colour."
 (defvar-local grove-graph--scale 1.0)
 (defvar-local grove-graph--raw-svg nil)
 (defvar-local grove-extra--hovered-node nil)
-(defvar-local grove-extra--parsed-svg-string nil)
-(defvar-local grove-extra--parsed-svg-nodes nil)
 
 (defvar grove-extra--previous-track-mouse nil)
+(defvar grove-extra-node-hover-functions nil
+  "Hook run when the mouse hovers over a new graph node or leaves a node.
+Functions should accept one argument: the NODE-ID string, or nil if empty space.")
 
 (setq grove-link--regexp "\\[\\[\\([^]\n|]+\\)\\(?:|[^]\n]+\\|\\]\\[[^]\n]+\\)?\\]\\]")
 
@@ -145,26 +141,6 @@ Nodes with matching tags will be rendered with the specified colour."
       (setq-local tab-line-tabs-function #'grove-extra--tab-line-buffers)
       (tab-line-mode 1))))
 
-(defun grove-extra--unescape-xml (str)
-  "Restore standard characters from XML-escaped node names."
-  (let ((s (replace-regexp-in-string "&quot;" "\"" str t t)))
-    (setq s (replace-regexp-in-string "&gt;" ">" s t t))
-    (setq s (replace-regexp-in-string "&lt;" "<" s t t))
-    (setq s (replace-regexp-in-string "&amp;" "&" s t t))
-    s))
-
-(defun grove-extra--parse-fa2-svg (svg-string)
-  "Extracts node coordinates directly from the visual SVG text."
-  (let ((nodes nil)
-        (start 0))
-    (while (string-match "<circle cx=\"\\(-?[0-9]+\\)\" cy=\"\\(-?[0-9]+\\)\"[^>]*>[ \t\n\r]*<text[^>]*>\\([^<]+\\)</text>" svg-string start)
-      (let ((name (grove-extra--unescape-xml (match-string 3 svg-string)))
-            (x (string-to-number (match-string 1 svg-string)))
-            (y (string-to-number (match-string 2 svg-string))))
-        (push (vector name x y) nodes))
-      (setq start (match-end 0)))
-    (vconcat nodes)))
-
 (defvar grove-extra-graph-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "+") #'grove-graph-zoom-in)
@@ -172,27 +148,23 @@ Nodes with matching tags will be rendered with the specified colour."
     (define-key map (kbd "0") #'grove-graph-zoom-reset)
     (define-key map (kbd "<wheel-up>") #'grove-graph-zoom-in)
     (define-key map (kbd "<wheel-down>") #'grove-graph-zoom-out)
-    
-    (define-key map [mouse-movement] #'grove-extra--track-graph-mouse)
-    (define-key map (kbd "<mouse-movement>") #'grove-extra--track-graph-mouse)
-    (define-key map [down-mouse-1] #'grove-extra--click-graph-node)
-    (define-key map (kbd "<down-mouse-1>") #'grove-extra--click-graph-node)
+
     map)
   "Keymap overriding `grove-graph-mode-map` with zooming and mouse tools.")
 
 (defun grove-extra--after-graph-fa2-render ()
   "Apply scaling and pointers to the graph-fa2 output."
-  (when (and (boundp 'graph-fa2--current-svg) graph-fa2--current-svg)
-    (setq-local grove-graph--raw-svg graph-fa2--current-svg)
+  (when (and (boundp 'graph-fa2-current-svg) graph-fa2-current-svg)
+    (setq-local grove-graph--raw-svg graph-fa2-current-svg)
     (grove-graph--update-display)))
 
 (defun grove-extra--graph-cleanup ()
   "Clean up playback buffers and timers when the graph is closed."
-  (when (fboundp 'graph-fa2--player-stop)
-    (graph-fa2--player-stop))
-  (when (and (boundp 'graph-fa2--playback-buffer)
-             (buffer-live-p graph-fa2--playback-buffer))
-    (kill-buffer graph-fa2--playback-buffer)))
+  (when (fboundp 'graph-fa2-player-stop)
+    (graph-fa2-player-stop))
+  (when (and (boundp 'graph-fa2-playback-buffer)
+             (buffer-live-p graph-fa2-playback-buffer))
+    (kill-buffer graph-fa2-playback-buffer)))
 
 (define-minor-mode grove-extra-graph-mode
   "Buffer-local minor mode for Grove Graph UI enhancements."
@@ -203,23 +175,45 @@ Nodes with matching tags will be rendered with the specified colour."
       (progn
         (setq-local cursor-type nil)
         (setq-local bidi-display-reordering nil)
+        
+        (setq-local top-margin-width 0
+                    bottom-margin-height 0
+                    left-margin-width 0
+                    right-margin-width 0)
+        (when (get-buffer-window (current-buffer) t)
+          (set-window-buffer (get-buffer-window (current-buffer) t) (current-buffer)))
+
         (setq-local grove-extra--face-cookie 
                     (face-remap-add-relative 'default :background grove-graph-bg-color))
         (add-hook 'kill-buffer-hook #'grove-extra--graph-cleanup nil t)
-        (add-hook 'window-size-change-functions #'grove-graph--update-display nil t))
+        (add-hook 'window-size-change-functions #'grove-graph--update-display nil t)
+        
+        (add-hook 'graph-fa2-node-clicked-functions #'grove-extra--handle-node-clicked nil t)
+        (add-hook 'graph-fa2-after-render-functions #'grove-extra--after-graph-fa2-render nil t))
     (progn
       (kill-local-variable 'cursor-type)
       (kill-local-variable 'bidi-display-reordering)
+      
+      (kill-local-variable 'top-margin-width)
+      (kill-local-variable 'bottom-margin-height)
+      (kill-local-variable 'left-margin-width)
+      (kill-local-variable 'right-margin-width)
+      (when (get-buffer-window (current-buffer) t)
+        (set-window-buffer (get-buffer-window (current-buffer) t) (current-buffer)))
+
       (when (boundp 'grove-extra--face-cookie)
         (face-remap-remove-relative grove-extra--face-cookie))
       (remove-hook 'kill-buffer-hook #'grove-extra--graph-cleanup t)
-      (remove-hook 'window-size-change-functions #'grove-graph--update-display t))))
+      (remove-hook 'window-size-change-functions #'grove-graph--update-display t)
+      
+      (remove-hook 'graph-fa2-node-clicked-functions #'grove-extra--handle-node-clicked t)
+      (remove-hook 'graph-fa2-after-render-functions #'grove-extra--after-graph-fa2-render t))))
 
 (defun grove-extra--enable-graph-mode ()
   "Turn on extra graph features, interactive bindings, and mouse tracking."
   (when grove-extra-mode
     (grove-extra-graph-mode 1)
-    (setq-local track-mouse t)))
+    (setq-local track-mouse 'all)))
 
 (define-minor-mode grove-extra-capture-mode
   "Buffer-local minor mode for Grove Capture enhancements."
@@ -749,7 +743,7 @@ structures and start the engine."
           (with-current-buffer buf
             (grove-graph-mode)
             (grove-extra--enable-graph-mode)
-            (when (fboundp 'graph-fa2--player-stop) (graph-fa2--player-stop))
+            (when (fboundp 'graph-fa2-player-stop) (graph-fa2-player-stop))
             (setq-local grove-graph--scale (if (eq grove-graph-renderer 'fa2) 1.0 grove-graph-default-zoom))
             (let ((inhibit-read-only t)) (erase-buffer)))
           (let ((win (display-buffer-in-side-window
@@ -759,7 +753,9 @@ structures and start the engine."
                         (window-width . 80)
                         (window-parameters . ((no-other-window . nil)
                                               (no-delete-other-windows . t)))))))
-            (when win (window-preserve-size win t t)))
+            (when win
+              (set-window-buffer win buf)
+              (window-preserve-size win t t)))
           (if (eq grove-graph-renderer 'fa2)
               (let* ((prepared (grove-extra--prepare-graph-data adjacency))
                      (nodes (plist-get prepared :nodes))
@@ -778,12 +774,6 @@ structures and start the engine."
                        (cl-reduce #'+ (mapcar (lambda (e) (length (cdr e))) adjacency)))))))
     (funcall orig-fun)))
 
-(defun grove-graph--adjust-svg-dimensions (svg-string width height)
-  (if (string-match "<svg\\([^>]*?\\)>" svg-string)
-      (let* ((attrs (match-string 1 svg-string))
-             (clean-attrs (replace-regexp-in-string "[ \t\n\r]*\\(?:width\\|height\\)=\"[^\"]*\"" "" attrs)))
-        (replace-match (format "<svg width=\"%d\" height=\"%d\" preserveAspectRatio=\"xMidYMid meet\"%s>" width height clean-attrs) t t svg-string))
-    svg-string))
 
 (defun grove-graph--update-display (&rest _)
   (when (and grove-graph--raw-svg (get-buffer-window (current-buffer) t))
@@ -794,12 +784,23 @@ structures and start the engine."
            (sized-svg (grove-graph--adjust-svg-dimensions grove-graph--raw-svg width height)))
       (when (= (buffer-size) 0) (insert " "))
       (let* ((max-image-size nil)
-             (encoded-svg (if (multibyte-string-p sized-svg) (encode-coding-string sized-svg 'utf-8) sized-svg)))
+             (encoded-svg (if (multibyte-string-p sized-svg) 
+                              (encode-coding-string sized-svg 'utf-8) 
+                            sized-svg)))
         (clear-image-cache)
-        (put-text-property (point-min) (point-max) 'display (create-image encoded-svg 'svg t))
         
-        (when grove-extra--hovered-node
-          (put-text-property (point-min) (point-max) 'pointer 'hand))))))
+        (add-text-properties 
+         (point-min) (point-max) 
+         (list 'display (create-image encoded-svg 'svg t)
+               'pointer (if (and (boundp 'graph-fa2-hovered-node) graph-fa2-hovered-node) 'hand nil)))))))
+(defun grove-graph--adjust-svg-dimensions (svg-string width height)
+  (if (string-match "<svg\\([^>]*?\\)>" svg-string)
+      (let* ((attrs (match-string 1 svg-string))
+             (clean-attrs (replace-regexp-in-string "[ \t\n\r]*\\(?:width\\|height\\)=\"[^\"]*\"" "" attrs)))
+        (replace-match (format "<svg width=\"%d\" height=\"%d\" preserveAspectRatio=\"xMidYMid meet\"%s>" width height clean-attrs) t t svg-string))
+    svg-string))
+
+
 
 (defun grove-graph-zoom-in ()
   (interactive)
@@ -816,103 +817,6 @@ structures and start the engine."
   (setq grove-graph--scale (if (eq grove-graph-renderer 'fa2) 1.0 grove-graph-default-zoom))
   (grove-graph--update-display))
 
-(defun grove-extra--graph-node-at-pos (posn)
-  "Finds the graph node under the mouse POSN"
-  (let* ((image-coords (posn-object-x-y posn))
-         (image-size (posn-object-width-height posn))) 
-
-    (when (and image-coords image-size)
-      (with-current-buffer (window-buffer (posn-window posn))
-        
-        (unless (eq grove-graph--raw-svg grove-extra--parsed-svg-string)
-          (let ((nodes nil)
-                (start 0))
-            (while (string-match "<circle cx=\"\\([0-9.-]+\\)\" cy=\"\\([0-9.-]+\\)\"[^>]*data-name=\"\\([^\"]+\\)\"" grove-graph--raw-svg start)
-              (push (vector (string-to-number (match-string 1 grove-graph--raw-svg))
-                            (string-to-number (match-string 2 grove-graph--raw-svg))
-                            (grove-extra--unescape-xml (match-string 3 grove-graph--raw-svg)))
-                    nodes)
-              (setq start (match-end 0)))
-            (setq grove-extra--parsed-svg-nodes (vconcat nodes))
-            (setq grove-extra--parsed-svg-string grove-graph--raw-svg)))
-        
-        (let* ((img-w (max 1.0 (float (car image-size))))
-               (img-h (max 1.0 (float (cdr image-size))))
-               
-               (min-dim (min img-w img-h))
-               (pad-x (/ (- img-w min-dim) 2.0))
-               (pad-y (/ (- img-h min-dim) 2.0))
-               
-               (active-x (- (car image-coords) pad-x))
-               (active-y (- (cdr image-coords) pad-y)))
-          
-          (when (and (>= active-x 0) (<= active-x min-dim)
-                     (>= active-y 0) (<= active-y min-dim))
-            
-            (let* ((scale (/ 500.0 min-dim))
-                   (mouse-x (* active-x scale))
-                   (mouse-y (* active-y scale))
-                   (nodes grove-extra--parsed-svg-nodes)
-                   (len (if nodes (length nodes) 0))
-                   (closest-node nil)
-                   (min-dist-sq 900.0))
-              
-              (dotimes (i len)
-                (let* ((n (aref nodes i))
-                       (nx (aref n 0))
-                       (ny (aref n 1))
-                       (dx (- mouse-x nx))
-                       (dy (- mouse-y ny))
-                       (dist-sq (+ (* dx dx) (* dy dy))))
-                  
-                  (when (< dist-sq min-dist-sq)
-                    (setq min-dist-sq dist-sq)
-                    (setq closest-node (aref n 2)))))
-              
-              closest-node)))))))
-
-(defun grove-extra--track-graph-mouse (event)
-  "Display the hovered node name globally and swap cursor to a hand icon."
-  (interactive "e")
-
-  (let* ((posn (event-start event))
-         (window (posn-window posn)))
-    (when (and (window-live-p window)
-               (equal (buffer-name (window-buffer window)) "*grove-graph*"))
-      (with-current-buffer (window-buffer window)
-        (let ((node (grove-extra--graph-node-at-pos posn))
-              (inhibit-read-only t))
-          (setq grove-extra--hovered-node node)
-          
-          (if node
-              (progn
-                (put-text-property (point-min) (point-max) 'pointer 'hand))
-            (progn
-              (put-text-property (point-min) (point-max) 'pointer nil))))))))
-
-(defun grove-extra--click-graph-node (event)
-  "Open the clicked node in the main editor window safely.
-If the ForceAtlas2 animated physics engine is active, delegate the click
-handling entirely to graph-fa2-click-node."
-  (interactive "e")
-  (if (eq grove-graph-renderer 'fa2)
-      (graph-fa2-click-node event)
-    (let* ((posn (event-start event))
-           (window (posn-window posn)))
-      (when (and (window-live-p window)
-                 (equal (buffer-name (window-buffer window)) "*grove-graph*"))
-        (with-current-buffer (window-buffer window)
-          (let ((node (grove-extra--graph-node-at-pos posn)))
-            (when node
-              (let* ((main-win (or (grove-tree--main-window) (next-window window)))
-                     (target-file (grove-extra--resolve-node-to-file node)))
-                (run-at-time 0 nil
-                             (lambda (win file node-name)
-                               (when (window-live-p win)
-                                 (select-window win))
-                               (find-file file)
-                               (message "Opened: %s" node-name))
-                             main-win target-file node)))))))))
 
 (defun grove-extra--resolve-node-to-file (node)
   "Resolve a NODE name to an absolute file path using Grove's internal logic."
@@ -941,8 +845,6 @@ handling entirely to graph-fa2-click-node."
         (add-hook 'grove-graph-mode-hook #'grove-extra--enable-graph-mode)
         (add-hook 'grove-capture-mode-hook #'grove-extra--enable-capture-mode)
         (add-hook 'find-file-hook #'grove-extra--turn-on-hook)
-        (add-hook 'graph-fa2-node-clicked-functions #'grove-extra--handle-node-clicked)
-        (add-hook 'graph-fa2-after-render-functions #'grove-extra--after-graph-fa2-render)
         
         (advice-add 'grove--parse-note :around #'grove-extra-around-parse-note)
         (advice-add 'grove--refresh-cache :around #'grove-extra-around-refresh-cache)
@@ -966,15 +868,13 @@ handling entirely to graph-fa2-click-node."
         (advice-add 'grove-search :around #'grove-extra-around-search)
 
         (advice-add 'grove-tree-open :after #'grove-extra--lock-sidebar-windows)
-        (advice-add 'grove-extra-graph :after #'grove-extra--lock-sidebar-windows))
+        (advice-add 'grove-graph :after #'grove-extra--lock-sidebar-windows))
     (progn
       (setq-default track-mouse grove-extra--previous-track-mouse)
       
       (remove-hook 'grove-graph-mode-hook #'grove-extra--enable-graph-mode)
       (remove-hook 'grove-capture-mode-hook #'grove-extra--enable-capture-mode)
       (remove-hook 'find-file-hook #'grove-extra--turn-on-hook)
-      (remove-hook 'graph-fa2-node-clicked-functions #'grove-extra--handle-node-clicked)
-      (remove-hook 'graph-fa2-after-render-functions #'grove-extra--after-graph-fa2-render)
       
       (advice-remove 'grove--parse-note #'grove-extra-around-parse-note)
       (advice-remove 'grove--refresh-cache #'grove-extra-around-refresh-cache)
@@ -997,7 +897,7 @@ handling entirely to graph-fa2-click-node."
       (advice-remove 'grove-tree--item-count #'grove-extra-around-tree-item-count)
       (advice-remove 'grove-search #'grove-extra-around-search)
       (advice-remove 'grove-tree-open #'grove-extra--lock-sidebar-windows)
-      (advice-remove 'grove-extra-graph #'grove-extra--lock-sidebar-windows))))
+      (advice-remove 'grove-graph #'grove-extra--lock-sidebar-windows))))
 
 (provide 'grove-extra)
 ;;; grove-extra.el ends here

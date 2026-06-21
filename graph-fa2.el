@@ -7,6 +7,63 @@
 (require 'cl-lib)
 (require 'json)
 
+(defgroup graph-fa2 nil
+  "ForceAtlas2 graph layout engine."
+  :group 'multimedia)
+
+(defcustom graph-fa2-repulsion-x-y-threshold 80954
+  "Threshold for coordinate differences when calculating node repulsion."
+  :type 'number
+  :group 'graph-fa2)
+
+(defcustom graph-fa2-repulsion-threshold 655360
+  "Threshold distance used for calculating node repulsion."
+  :type 'number
+  :group 'graph-fa2)
+
+(defcustom graph-fa2-repulsion-max-dist-sq 6553600000
+  "Maximum squared distance for repulsion force calculation."
+  :type 'number
+  :group 'graph-fa2)
+
+(defcustom graph-fa2-attraction-threshold 12800
+  "Threshold used in calculating node attraction."
+  :type 'number
+  :group 'graph-fa2)
+
+(defcustom graph-fa2-speed-limit-threshold 12800
+  "Maximum speed limit parameter for node layout integration."
+  :type 'number
+  :group 'graph-fa2)
+
+(defcustom graph-fa2-horizon-threshold 61440
+  "Boundary threshold where layout node coordinates are clamped."
+  :type 'number
+  :group 'graph-fa2)
+
+(defcustom graph-fa2-horizon-start-threshold 49152
+  "Threshold where friction starts damping node velocities near the horizon."
+  :type 'number
+  :group 'graph-fa2)
+
+(defcustom graph-fa2-simulation-frames 840
+  "Total number of frames to calculate for the layout simulation."
+  :type 'integer
+  :group 'graph-fa2)
+
+(defcustom graph-fa2-framerate 60.0
+  "Target framerate for the animated graph playback."
+  :type 'float
+  :group 'graph-fa2)
+
+(defvar-local graph-fa2-node-clicked-functions nil
+  "List of functions to be called when a graph node is clicked.
+Each function must accept one argument: the node identifier.")
+
+(defvar-local graph-fa2-node-hovered-functions nil
+  "List of functions to be called when a mouse hovers over a graph node.
+Each function must accept one argument: the node identifier, or nil if cleared.")
+
 (defconst graph-fa2--substeps 10
   "The number of physics substeps per frame.")
 
@@ -39,16 +96,114 @@
 
 (defvar-local graph-fa2--current-frame 0)
 (defvar-local graph-fa2--frame-offsets nil)
-(defvar-local graph-fa2--playback-buffer nil)
-(defvar-local graph-fa2--current-svg nil)
+(defvar-local graph-fa2-playback-buffer nil)
+(defvar-local graph-fa2-current-svg nil)
 (defvar-local graph-fa2--player-timer nil)
+(defvar-local graph-fa2--hitbox-svg-string nil
+  "Tracks the SVG string used to generate the current hitboxes.")
 
-(defvar graph-fa2-node-clicked-functions nil
-  "Abnormal hook run when a graph node is clicked.
-Each hook function receives the opaque node identifier string as its sole argument.")
+(defvar-local graph-fa2--active-hitboxes nil
+  "A fast-access vector of [ID X Y] for the currently displayed frame.")
+
+(defvar-local graph-fa2-hovered-node nil
+  "Tracks the currently hovered node within the fa2 engine.")
 
 (defvar graph-fa2-after-render-functions nil
   "Hook run after a graph frame is rendered.")
+
+(defun graph-fa2-track-mouse (event)
+  "Track mouse movement internally, swap cursor, and fire hover hooks."
+  (interactive "e")
+  (let* ((posn (event-start event))
+         (window (posn-window posn)))
+    (when (window-live-p window)
+      (with-current-buffer (window-buffer window)
+        (let* ((coords (posn-object-x-y posn))
+               (size (posn-object-width-height posn))
+               (node (when (and coords size)
+                       (graph-fa2-node-at-scaled-pos
+                        (float (car coords))
+                        (float (cdr coords))
+                        (max 1.0 (float (car size)))
+                        (max 1.0 (float (cdr size)))))))
+          
+          (unless (equal node graph-fa2-hovered-node)
+            (setq graph-fa2-hovered-node node)
+            (let ((inhibit-read-only t))
+              (if node
+                  (put-text-property (point-min) (point-max) 'pointer 'hand)
+                (put-text-property (point-min) (point-max) 'pointer nil)))
+            (run-hook-with-args 'graph-fa2-node-hovered-functions node)))))))
+
+(defalias 'graph-fa2--track-mouse #'graph-fa2-track-mouse "Obsolete internal mouse tracking function alias.")
+(make-obsolete 'graph-fa2--track-mouse 'graph-fa2-track-mouse "1.0.0")
+
+(defun graph-fa2-click-node (event)
+  "Handle a mouse click event on a graph node.
+Extract the node coordinates from EVENT and parse the active node
+from the SVG string to pass the resolved node to subscribers."
+  (interactive "e")
+  (let* ((posn (event-start event))
+         (window (posn-window posn)))
+    (when (window-live-p window)
+      (with-current-buffer (window-buffer window)
+        (let* ((coords (posn-object-x-y posn))
+               (size (posn-object-width-height posn))
+               (node (when (and coords size)
+                       (graph-fa2-node-at-scaled-pos
+                        (float (car coords))
+                        (float (cdr coords))
+                        (max 1.0 (float (car size)))
+                        (max 1.0 (float (cdr size)))))))
+          (when node
+            (run-hook-with-args 'graph-fa2-node-clicked-functions node)))))))
+
+(defun graph-fa2-node-at-scaled-pos (active-x active-y img-w img-h)
+  "Extract the closest node identifier at the given coordinates."
+
+  (when (and graph-fa2-current-svg
+             (not (equal graph-fa2-current-svg graph-fa2--hitbox-svg-string)))
+    (let ((hitboxes nil)
+          (start 0))
+      (while (string-match "<circle cx=\"\\([0-9.]+\\)\" cy=\"\\([0-9.]+\\)\" r=\"\\([0-9.]+\\)\"[^>]*data-name=\"\\([^\"]+\\)\"" graph-fa2-current-svg start)
+        (let ((cx (string-to-number (match-string 1 graph-fa2-current-svg)))
+              (cy (string-to-number (match-string 2 graph-fa2-current-svg)))
+              (r (string-to-number (match-string 3 graph-fa2-current-svg)))
+              (id (graph-fa2--unescape-xml (match-string 4 graph-fa2-current-svg))))
+          (push (vector id cx cy r) hitboxes))
+        (setq start (match-end 0)))
+      (setq graph-fa2--active-hitboxes (vconcat (nreverse hitboxes)))
+      (setq graph-fa2--hitbox-svg-string graph-fa2-current-svg)))
+
+  (let* ((min-dim (min img-w img-h))
+         (pad-x (/ (- img-w min-dim) 2.0))
+         (pad-y (/ (- img-h min-dim) 2.0))
+         (adj-x (- active-x pad-x))
+         (adj-y (- active-y pad-y)))
+
+    (when (and (>= adj-x 0) (<= adj-x min-dim)
+               (>= adj-y 0) (<= adj-y min-dim))
+      (let* ((scale (/ graph-fa2--canvas-size min-dim))
+             (mouse-x (* adj-x scale))
+             (mouse-y (* adj-y scale))
+             (nodes graph-fa2--active-hitboxes)
+             (len (if nodes (length nodes) 0))
+             (closest-node nil)
+             (min-dist-sq 900.0))
+
+        (dotimes (i len)
+          (let* ((n (aref nodes i))
+                 (nx (aref n 1))
+                 (ny (aref n 2))
+                 (dx (- mouse-x nx))
+                 (dy (- mouse-y ny))
+                 (dist-sq (+ (* dx dx) (* dy dy))))
+
+            (when (< dist-sq min-dist-sq)
+              (setq min-dist-sq dist-sq)
+              (setq closest-node (aref n 0)))))
+
+        closest-node))))
 
 (cl-defstruct graph-fa2-ctx
   "State structure for ForceAtlas2 physics simulation.
@@ -260,16 +415,16 @@ garbage collection pressure during background rendering."
           (cl-loop for j from (1+ i) below len do
                    (let* ((dx (- nix (aref pos-x j)))
                           (abs-dx (if (< dx 0) (- dx) dx)))
-                     (when (< abs-dx 80954)
+                     (when (< abs-dx graph-fa2-repulsion-x-y-threshold)
                        (let* ((dy (- niy (aref pos-y j)))
                               (abs-dy (if (< dy 0) (- dy) dy)))
-                         (when (< abs-dy 80954)
+                         (when (< abs-dy graph-fa2-repulsion-x-y-threshold)
                            (let* ((max-d (if (> abs-dx abs-dy) abs-dx abs-dy))
                                   (min-d (if (> abs-dx abs-dy) abs-dy abs-dx))
                                   (dist (if (= max-d 0) 1 (+ max-d (ash (truncate min-d) -1))))
                                   (dist-sq (+ (* dx dx) (* dy dy)))
-                                  (dist-sq (if (< dist-sq 655360) 655360 dist-sq)))
-                             (when (< dist-sq 6553600000)
+                                  (dist-sq (if (< dist-sq graph-fa2-repulsion-threshold) graph-fa2-repulsion-threshold dist-sq)))
+                             (when (< dist-sq graph-fa2-repulsion-max-dist-sq)
                                (let* ((mass-mult (truncate (aref mass-matrix (+ i-offset j))))
                                       (num (ash (truncate (* a mass-mult)) 16))
                                       (den (* dist dist-sq))
@@ -308,7 +463,7 @@ garbage collection pressure during background rendering."
                (max-d (if (> abs-dx abs-dy) abs-dx abs-dy))
                (min-d (if (> abs-dx abs-dy) abs-dy abs-dx))
                (dist (if (= max-d 0) 1 (+ max-d (ash (truncate min-d) -1))))
-               (dist-diff (- dist 12800))
+               (dist-diff (- dist graph-fa2-attraction-threshold))
                (num (* a dist-diff))
                (den (ash (truncate dist) 16))
                (fdx (/ (* dx num) den))
@@ -348,13 +503,13 @@ garbage collection pressure during background rendering."
                (min-v (if (> abs-vx abs-vy) abs-vy abs-vx))
                (speed (if (= max-v 0) 1 (+ max-v (ash (truncate min-v) -1)))))
           (when (> speed 25)
-            (let ((v-max 12800))
+            (let ((v-max graph-fa2-speed-limit-threshold))
               (aset vel-x i (/ (* (truncate vx) v-max) (+ speed v-max)))
               (aset vel-y i (/ (* (truncate vy) v-max) (+ speed v-max))))))
         (aset pos-x i (+ nx (ash (truncate (aref vel-x i)) -4)))
         (aset pos-y i (+ ny (ash (truncate (aref vel-y i)) -4)))
-        (let* ((horizon 61440)
-               (horizon-start 49152)
+        (let* ((horizon graph-fa2-horizon-threshold)
+               (horizon-start graph-fa2-horizon-start-threshold)
                (new-nx (aref pos-x i))
                (new-ny (aref pos-y i))
                (abs-new-nx (if (< new-nx 0) (- new-nx) new-nx))
@@ -398,6 +553,7 @@ garbage collection pressure during background rendering."
          (edges (graph-fa2-ctx-edges ctx))
          (pos-x (graph-fa2-ctx-pos-x ctx))
          (pos-y (graph-fa2-ctx-pos-y ctx))
+         (hitboxes (make-vector len nil))
          (gc-cons-threshold most-positive-fixnum))
     (with-current-buffer (graph-fa2-ctx-bg-buffer ctx)
       (let* ((canvas-int (truncate 500.0))
@@ -427,6 +583,8 @@ garbage collection pressure during background rendering."
                  (lines (graph-fa2--wrap-text name-escaped 10))
                  (line-height 12)
                  (start-y (- ny-int 15 (* (1- (length lines)) (/ line-height 2)))))
+
+            (aset hitboxes i (vector id nx-int ny-int radius))
             (insert "  <circle cx=\"" nx "\" cy=\"" ny "\" r=\"" (number-to-string radius) "\" fill=\"" colour "\" data-name=\"" (graph-fa2--escape-xml id) "\" />\n")
             (insert "  <text fill=\"#cdd6f4\" font-size=\"10\" text-anchor=\"middle\">\n")
             (let ((curr-y start-y))
@@ -434,6 +592,7 @@ garbage collection pressure during background rendering."
                 (insert "    <tspan x=\"" nx "\" y=\"" (number-to-string curr-y) "\">" line "</tspan>\n")
                 (cl-incf curr-y line-height)))
             (insert "  </text>\n")))
+        (setq graph-fa2--active-hitboxes hitboxes)
         (insert "</svg>\n<FRAME_SPLIT>\n")))))
 
 (defun graph-fa2--physics-tick (ctx max-frames)
@@ -465,7 +624,7 @@ Synchronise buffers to state and trigger background rendering."
 (defun graph-fa2--hot-reload-player (buf bg-buffer)
   "Feeds newly rendered frames into the live player without restarting."
   (when (buffer-live-p buf)
-    (let ((playback-buf (buffer-local-value 'graph-fa2--playback-buffer buf)))
+    (let ((playback-buf (buffer-local-value 'graph-fa2-playback-buffer buf)))
       (when (buffer-live-p playback-buf)
         (with-current-buffer playback-buf
           (let ((inhibit-read-only t)
@@ -537,15 +696,20 @@ Synchronise buffers to state and trigger background rendering."
       (kill-buffer (graph-fa2-ctx-bg-buffer ctx)))))
 
 (defun graph-fa2--update-display ()
-  "Renders the current SVG frame into the buffer."
-  (when (and graph-fa2--current-svg (get-buffer-window (current-buffer) t))
+  "Renders the current SVG frame into the buffer natively."
+  (when (and graph-fa2-current-svg (get-buffer-window (current-buffer) t))
     (let ((inhibit-read-only t)
-          (encoded-svg (if (multibyte-string-p graph-fa2--current-svg)
-                           (encode-coding-string graph-fa2--current-svg 'utf-8)
-                         graph-fa2--current-svg)))
+          (encoded-svg (if (multibyte-string-p graph-fa2-current-svg)
+                           (encode-coding-string graph-fa2-current-svg 'utf-8)
+                         graph-fa2-current-svg)))
       (clear-image-cache)
       (when (= (buffer-size) 0) (insert " "))
-      (put-text-property (point-min) (point-max) 'display (create-image encoded-svg 'svg t))
+
+      (add-text-properties 
+       (point-min) (point-max) 
+       (list 'display (create-image encoded-svg 'svg t)
+             'pointer (if graph-fa2-hovered-node 'hand nil)))
+
       (run-hooks 'graph-fa2-after-render-functions))))
 
 (defun graph-fa2--player-tick ()
@@ -557,16 +721,16 @@ Synchronise buffers to state and trigger background rendering."
             (progn
               (let ((bounds (when graph-fa2--frame-offsets 
                               (aref graph-fa2--frame-offsets graph-fa2--current-frame))))
-                (setq graph-fa2--current-svg
+                (setq graph-fa2-current-svg
                       (if bounds
-                          (with-current-buffer graph-fa2--playback-buffer
+                          (with-current-buffer graph-fa2-playback-buffer
                             (buffer-substring-no-properties (car bounds) (cdr bounds)))
                         nil)))
               (graph-fa2--update-display)
               (cl-incf graph-fa2--current-frame))
-          (graph-fa2--player-stop))))))
+          (graph-fa2-player-stop))))))
 
-(defun graph-fa2--player-start ()
+(defun graph-fa2-player-start ()
   "Starts the animation playback loop if frames are populated."
   (when graph-fa2--frame-offsets
     (unless graph-fa2--player-timer
@@ -578,77 +742,34 @@ Synchronise buffers to state and trigger background rendering."
                                   (with-current-buffer buf
                                     (graph-fa2--player-tick))))))))))
 
-(defun graph-fa2--player-stop ()
+(defalias 'graph-fa2--player-start #'graph-fa2-player-start "Obsolete internal player start function alias.")
+(make-obsolete 'graph-fa2--player-start 'graph-fa2-player-start "1.0.0")
+
+(defun graph-fa2-player-stop ()
   "Halts the animation loop."
   (when graph-fa2--player-timer
     (cancel-timer graph-fa2--player-timer)
     (setq graph-fa2--player-timer nil)))
 
-(defun graph-fa2-click-node (event)
-  "Handle a mouse click on the SVG and run the abnormal hooks with the node identifier."
-  (interactive "e")
-  (let* ((posn (event-start event))
-         (image-coords (posn-object-x-y posn))
-         (image-size (posn-object-width-height posn)))
-    (when (and image-coords image-size)
-      (with-current-buffer (window-buffer (posn-window posn))
-        (let ((current-svg
-               (if (and (boundp 'graph-fa2--current-frame)
-                        (boundp 'graph-fa2--frame-offsets)
-                        (boundp 'graph-fa2--playback-buffer)
-                        graph-fa2--playback-buffer
-                        (buffer-live-p graph-fa2--playback-buffer)
-                        graph-fa2--frame-offsets)
-                   (let* ((clamped-frame (max 0 (min graph-fa2--current-frame (1- (length graph-fa2--frame-offsets)))))
-                          (bounds (aref graph-fa2--frame-offsets clamped-frame)))
-                     (with-current-buffer graph-fa2--playback-buffer
-                       (buffer-substring-no-properties (car bounds) (cdr bounds))))
-                 (and (boundp 'graph-fa2--current-svg) graph-fa2--current-svg))))
-          
-          (when current-svg
-            (let ((nodes nil)
-                  (start 0))
-              (while (string-match "<circle cx=\"\\([0-9.-]+\\)\" cy=\"\\([0-9.-]+\\)\"[^>]*data-name=\"\\([^\"]+\\)\"" current-svg start)
-                (push (vector (string-to-number (match-string 1 current-svg))
-                              (string-to-number (match-string 2 current-svg))
-                              (match-string 3 current-svg))
-                      nodes)
-                (setq start (match-end 0)))
-              (let* ((img-w (max 1.0 (float (car image-size))))
-                     (img-h (max 1.0 (float (cdr image-size))))
-                     (min-dim (min img-w img-h))
-                     (pad-x (/ (- img-w min-dim) 2.0))
-                     (pad-y (/ (- img-h min-dim) 2.0))
-                     (active-x (- (car image-coords) pad-x))
-                     (active-y (- (cdr image-coords) pad-y)))
-                (when (and (>= active-x 0) (<= active-x min-dim)
-                           (>= active-y 0) (<= active-y min-dim))
-                  (let* ((scale (/ 500.0 min-dim))
-                         (mouse-x (* active-x scale))
-                         (mouse-y (* active-y scale))
-                         (nodes-vec (vconcat nodes))
-                         (len (length nodes-vec))
-                         (closest-node nil)
-                         (min-dist-sq 900.0))
-                    (dotimes (i len)
-                      (let* ((n (aref nodes-vec i))
-                             (nx (aref n 0))
-                             (ny (aref n 1))
-                             (dx (- mouse-x nx))
-                             (dy (- mouse-y ny))
-                             (dist-sq (+ (* dx dx) (* dy dy))))
-                        (when (< dist-sq min-dist-sq)
-                          (setq min-dist-sq dist-sq)
-                          (setq closest-node (aref n 2)))))
-                    (if closest-node
-                        (run-hook-with-args 'graph-fa2-node-clicked-functions (graph-fa2--unescape-xml closest-node)))))))))))))
+(defalias 'graph-fa2--player-stop #'graph-fa2-player-stop "Obsolete internal player stop function alias.")
+(make-obsolete 'graph-fa2--player-stop 'graph-fa2-player-stop "1.0.0")
 
-(defvar graph-fa2-keymap
+(defvar graph-fa2-mode-map
   (let ((map (make-sparse-keymap)))
+    (define-key map [mouse-movement] #'graph-fa2-track-mouse)
+    (define-key map (kbd "<mouse-movement>") #'graph-fa2-track-mouse)
     (define-key map [down-mouse-1] #'graph-fa2-click-node)
     (define-key map (kbd "<down-mouse-1>") #'graph-fa2-click-node)
     map)
-  "Local keymap for the ForceAtlas2 animated graph buffer.")
+  "Keymap for graph-fa2 minor mode.")
+
+(define-minor-mode graph-fa2-mode
+  "Minor mode for viewing and interacting with ForceAtlas2 graphs."
+  :lighter " FA2"
+  :keymap graph-fa2-mode-map
+  (if graph-fa2-mode
+      (setq-local track-mouse t)
+    (setq-local track-mouse nil)))
 
 (defun graph-fa2--load-and-play (buf cache-file)
   "Streams the fully computed cache file back to the Emacs frontend."
@@ -668,15 +789,15 @@ Synchronise buffers to state and trigger background rendering."
             (push (cons start (point-max)) offsets))))
       (let* ((offsets-vec (vconcat (nreverse offsets)))
              (first-bounds (aref offsets-vec 0)))
-        (setq-local graph-fa2--playback-buffer playback-buf)
+        (setq-local graph-fa2-playback-buffer playback-buf)
         (setq-local graph-fa2--frame-offsets offsets-vec)
         (setq-local graph-fa2--current-frame 0)
-        (setq-local graph-fa2--current-svg (with-current-buffer playback-buf
-                                             (buffer-substring-no-properties (car first-bounds) (cdr first-bounds))))
-        (use-local-map (make-composed-keymap graph-fa2-keymap (current-local-map)))
+        (setq-local graph-fa2-current-svg (with-current-buffer playback-buf
+                                            (buffer-substring-no-properties (car first-bounds) (cdr first-bounds))))
+        (graph-fa2-mode 1)
         (graph-fa2--update-display)
         (message "Graph playback started.")
-        (graph-fa2--player-start)))))
+        (graph-fa2-player-start)))))
 
 (defun graph-fa2--plist-to-alist (item)
   "Convert a property list ITEM to an association list if it is a property list.
@@ -727,7 +848,7 @@ and starts the rendering thread."
           (setq-local graph-fa2-ctx ctx))
         (setf (graph-fa2-ctx-bg-buffer ctx) (generate-new-buffer " *graph-fa2-bg*"))
         (setf (graph-fa2-ctx-bg-timer ctx)
-              (run-at-time 0 nil #'graph-fa2--render-chunk ctx data-file hash-file current-hash buf 840 60.0))))))
+              (run-at-time 0 nil #'graph-fa2--render-chunk ctx data-file hash-file current-hash buf graph-fa2-simulation-frames graph-fa2-framerate))))))
 
 ;;;###autoload
 (defun graph-fa2-clear-cache (&optional cache-dir)
