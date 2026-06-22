@@ -64,6 +64,9 @@ Each function must accept one argument: the node identifier.")
   "List of functions to be called when a mouse hovers over a graph node.
 Each function must accept one argument: the node identifier, or nil if cleared.")
 
+(defvar-local graph-fa2--scale 1.0
+  "Current zoom scale for the background engine.")
+
 (defconst graph-fa2--substeps 10
   "The number of physics substeps per frame.")
 
@@ -695,13 +698,43 @@ Synchronise buffers to state and trigger background rendering."
         (graph-fa2--load-and-play target-buf cache-file))
       (kill-buffer (graph-fa2-ctx-bg-buffer ctx)))))
 
-(defun graph-fa2--update-display ()
+(defun graph-fa2-zoom-in ()
+  "Increase the scale of the rendered graph."
+  (interactive)
+  (setq graph-fa2--scale (* graph-fa2--scale 1.2))
+  (graph-fa2--update-display))
+
+(defun graph-fa2-zoom-out ()
+  "Decrease the scale of the rendered graph."
+  (interactive)
+  (setq graph-fa2--scale (/ graph-fa2--scale 1.2))
+  (graph-fa2--update-display))
+
+(defun graph-fa2-zoom-reset ()
+  "Reset the graph scale to default."
+  (interactive)
+  (setq graph-fa2--scale 1.0)
+  (graph-fa2--update-display))
+
+(defun graph-fa2--adjust-svg-dimensions (svg-string width height)
+  "Apply scaling factors to the SVG frame."
+  (if (string-match "<svg\\([^>]*?\\)>" svg-string)
+      (let* ((attrs (match-string 1 svg-string))
+             (clean-attrs (replace-regexp-in-string "[ \t\n\r]*\\(?:width\\|height\\)=\"[^\"]*\"" "" attrs)))
+        (replace-match (format "<svg width=\"%d\" height=\"%d\" preserveAspectRatio=\"xMidYMid meet\"%s>" width height clean-attrs) t t svg-string))
+    svg-string))
+
+(defun graph-fa2--update-display (&rest _)
   "Renders the current SVG frame into the buffer natively."
   (when (and graph-fa2-current-svg (get-buffer-window (current-buffer) t))
-    (let ((inhibit-read-only t)
-          (encoded-svg (if (multibyte-string-p graph-fa2-current-svg)
-                           (encode-coding-string graph-fa2-current-svg 'utf-8)
-                         graph-fa2-current-svg)))
+    (let* ((inhibit-read-only t)
+           (win (get-buffer-window (current-buffer) t))
+           (width (max 100 (truncate (* (window-pixel-width win) graph-fa2--scale))))
+           (height (max 100 (truncate (* (window-pixel-height win) graph-fa2--scale))))
+           (sized-svg (graph-fa2--adjust-svg-dimensions graph-fa2-current-svg width height))
+           (encoded-svg (if (multibyte-string-p sized-svg)
+                            (encode-coding-string sized-svg 'utf-8)
+                          sized-svg)))
       (clear-image-cache)
       (when (= (buffer-size) 0) (insert " "))
 
@@ -760,6 +793,11 @@ Synchronise buffers to state and trigger background rendering."
     (define-key map (kbd "<mouse-movement>") #'graph-fa2-track-mouse)
     (define-key map [down-mouse-1] #'graph-fa2-click-node)
     (define-key map (kbd "<down-mouse-1>") #'graph-fa2-click-node)
+    (define-key map (kbd "+") #'graph-fa2-zoom-in)
+    (define-key map (kbd "-") #'graph-fa2-zoom-out)
+    (define-key map (kbd "0") #'graph-fa2-zoom-reset)
+    (define-key map (kbd "<wheel-up>") #'graph-fa2-zoom-in)
+    (define-key map (kbd "<wheel-down>") #'graph-fa2-zoom-out)
     map)
   "Keymap for graph-fa2 minor mode.")
 
@@ -768,8 +806,12 @@ Synchronise buffers to state and trigger background rendering."
   :lighter " FA2"
   :keymap graph-fa2-mode-map
   (if graph-fa2-mode
-      (setq-local track-mouse t)
-    (setq-local track-mouse nil)))
+      (progn
+        (setq-local track-mouse t)
+        (add-hook 'window-size-change-functions #'graph-fa2--update-display nil t))
+    (progn
+      (setq-local track-mouse nil)
+      (remove-hook 'window-size-change-functions #'graph-fa2--update-display t))))
 
 (defun graph-fa2--load-and-play (buf cache-file)
   "Streams the fully computed cache file back to the Emacs frontend."

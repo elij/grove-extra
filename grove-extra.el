@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.4.6
+;; Version: 0.4.7
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -152,12 +152,6 @@ Functions should accept one argument: the NODE-ID string, or nil if empty space.
     map)
   "Keymap overriding `grove-graph-mode-map` with zooming and mouse tools.")
 
-(defun grove-extra--after-graph-fa2-render ()
-  "Apply scaling and pointers to the graph-fa2 output."
-  (when (and (boundp 'graph-fa2-current-svg) graph-fa2-current-svg)
-    (setq-local grove-graph--raw-svg graph-fa2-current-svg)
-    (grove-graph--update-display)))
-
 (defun grove-extra--graph-cleanup ()
   "Clean up playback buffers and timers when the graph is closed."
   (when (fboundp 'graph-fa2-player-stop)
@@ -188,8 +182,7 @@ Functions should accept one argument: the NODE-ID string, or nil if empty space.
         (add-hook 'kill-buffer-hook #'grove-extra--graph-cleanup nil t)
         (add-hook 'window-size-change-functions #'grove-graph--update-display nil t)
         
-        (add-hook 'graph-fa2-node-clicked-functions #'grove-extra--handle-node-clicked nil t)
-        (add-hook 'graph-fa2-after-render-functions #'grove-extra--after-graph-fa2-render nil t))
+        (add-hook 'graph-fa2-node-clicked-functions #'grove-extra--handle-node-clicked nil t))
     (progn
       (kill-local-variable 'cursor-type)
       (kill-local-variable 'bidi-display-reordering)
@@ -206,8 +199,7 @@ Functions should accept one argument: the NODE-ID string, or nil if empty space.
       (remove-hook 'kill-buffer-hook #'grove-extra--graph-cleanup t)
       (remove-hook 'window-size-change-functions #'grove-graph--update-display t)
       
-      (remove-hook 'graph-fa2-node-clicked-functions #'grove-extra--handle-node-clicked t)
-      (remove-hook 'graph-fa2-after-render-functions #'grove-extra--after-graph-fa2-render t))))
+      (remove-hook 'graph-fa2-node-clicked-functions #'grove-extra--handle-node-clicked t))))
 
 (defun grove-extra--enable-graph-mode ()
   "Turn on extra graph features, interactive bindings, and mouse tracking."
@@ -792,7 +784,8 @@ structures and start the engine."
         (add-text-properties 
          (point-min) (point-max) 
          (list 'display (create-image encoded-svg 'svg t)
-               'pointer (if (and (boundp 'graph-fa2-hovered-node) graph-fa2-hovered-node) 'hand nil)))))))
+               'pointer (if grove-extra--hovered-node 'hand nil)))))))
+
 (defun grove-graph--adjust-svg-dimensions (svg-string width height)
   (if (string-match "<svg\\([^>]*?\\)>" svg-string)
       (let* ((attrs (match-string 1 svg-string))
@@ -800,22 +793,26 @@ structures and start the engine."
         (replace-match (format "<svg width=\"%d\" height=\"%d\" preserveAspectRatio=\"xMidYMid meet\"%s>" width height clean-attrs) t t svg-string))
     svg-string))
 
-
-
 (defun grove-graph-zoom-in ()
   (interactive)
-  (setq grove-graph--scale (* grove-graph--scale 1.2))
-  (grove-graph--update-display))
+  (if (bound-and-true-p graph-fa2-mode)
+      (graph-fa2-zoom-in)
+    (setq grove-graph--scale (* grove-graph--scale 1.2))
+    (grove-graph--update-display)))
 
 (defun grove-graph-zoom-out ()
   (interactive)
-  (setq grove-graph--scale (/ grove-graph--scale 1.2))
-  (grove-graph--update-display))
+  (if (bound-and-true-p graph-fa2-mode)
+      (graph-fa2-zoom-out)
+    (setq grove-graph--scale (/ grove-graph--scale 1.2))
+    (grove-graph--update-display)))
 
 (defun grove-graph-zoom-reset ()
   (interactive)
-  (setq grove-graph--scale (if (eq grove-graph-renderer 'fa2) 1.0 grove-graph-default-zoom))
-  (grove-graph--update-display))
+  (if (bound-and-true-p graph-fa2-mode)
+      (graph-fa2-zoom-reset)
+    (setq grove-graph--scale (if (eq grove-graph-renderer 'fa2) 1.0 grove-graph-default-zoom))
+    (grove-graph--update-display)))
 
 
 (defun grove-extra--resolve-node-to-file (node)
