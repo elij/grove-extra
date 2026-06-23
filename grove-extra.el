@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.4.7
+;; Version: 0.4.8
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -141,17 +141,6 @@ Functions should accept one argument: the NODE-ID string, or nil if empty space.
       (setq-local tab-line-tabs-function #'grove-extra--tab-line-buffers)
       (tab-line-mode 1))))
 
-(defvar grove-extra-graph-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "+") #'grove-graph-zoom-in)
-    (define-key map (kbd "-") #'grove-graph-zoom-out)
-    (define-key map (kbd "0") #'grove-graph-zoom-reset)
-    (define-key map (kbd "<wheel-up>") #'grove-graph-zoom-in)
-    (define-key map (kbd "<wheel-down>") #'grove-graph-zoom-out)
-
-    map)
-  "Keymap overriding `grove-graph-mode-map` with zooming and mouse tools.")
-
 (defun grove-extra--graph-cleanup ()
   "Clean up playback buffers and timers when the graph is closed."
   (when (fboundp 'graph-fa2-player-stop)
@@ -164,11 +153,14 @@ Functions should accept one argument: the NODE-ID string, or nil if empty space.
   "Buffer-local minor mode for Grove Graph UI enhancements."
   :init-value nil
   :lighter " Graph+"
-  :keymap grove-extra-graph-mode-map
   (if grove-extra-graph-mode
+      
       (progn
         (setq-local cursor-type nil)
         (setq-local bidi-display-reordering nil)
+        (if (not (eq grove-graph-renderer 'fa2))
+            (use-local-map grove-graph-mode-map)
+          )
         
         (setq-local top-margin-width 0
                     bottom-margin-height 0
@@ -792,28 +784,6 @@ structures and start the engine."
              (clean-attrs (replace-regexp-in-string "[ \t\n\r]*\\(?:width\\|height\\)=\"[^\"]*\"" "" attrs)))
         (replace-match (format "<svg width=\"%d\" height=\"%d\" preserveAspectRatio=\"xMidYMid meet\"%s>" width height clean-attrs) t t svg-string))
     svg-string))
-
-(defun grove-graph-zoom-in ()
-  (interactive)
-  (if (bound-and-true-p graph-fa2-mode)
-      (graph-fa2-zoom-in)
-    (setq grove-graph--scale (* grove-graph--scale 1.2))
-    (grove-graph--update-display)))
-
-(defun grove-graph-zoom-out ()
-  (interactive)
-  (if (bound-and-true-p graph-fa2-mode)
-      (graph-fa2-zoom-out)
-    (setq grove-graph--scale (/ grove-graph--scale 1.2))
-    (grove-graph--update-display)))
-
-(defun grove-graph-zoom-reset ()
-  (interactive)
-  (if (bound-and-true-p graph-fa2-mode)
-      (graph-fa2-zoom-reset)
-    (setq grove-graph--scale (if (eq grove-graph-renderer 'fa2) 1.0 grove-graph-default-zoom))
-    (grove-graph--update-display)))
-
 
 (defun grove-extra--resolve-node-to-file (node)
   "Resolve a NODE name to an absolute file path using Grove's internal logic."

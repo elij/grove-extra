@@ -56,6 +56,17 @@
   :type 'float
   :group 'graph-fa2)
 
+(defcustom graph-fa2-zoom-friction 0.85
+  "Friction applied to zoom velocity per frame (0.0 to 1.0).
+Lower is more friction (stops faster), higher is 'slippery'."
+  :type 'float
+  :group 'graph-fa2)
+
+(defcustom graph-fa2-zoom-acceleration 0.06
+  "Amount of velocity added per scroll wheel tick."
+  :type 'float
+  :group 'graph-fa2)
+
 (defvar-local graph-fa2-node-clicked-functions nil
   "List of functions to be called when a graph node is clicked.
 Each function must accept one argument: the node identifier.")
@@ -66,6 +77,12 @@ Each function must accept one argument: the node identifier, or nil if cleared."
 
 (defvar-local graph-fa2--scale 1.0
   "Current zoom scale for the background engine.")
+
+(defvar-local graph-fa2--zoom-velocity 0.0
+  "Current inertial velocity of the zoom operation.")
+
+(defvar-local graph-fa2--zoom-timer nil
+  "Timer object for the inertial zoom animation.")
 
 (defconst graph-fa2--substeps 10
   "The number of physics substeps per frame.")
@@ -698,21 +715,51 @@ Synchronise buffers to state and trigger background rendering."
         (graph-fa2--load-and-play target-buf cache-file))
       (kill-buffer (graph-fa2-ctx-bg-buffer ctx)))))
 
+(defun graph-fa2--zoom-tick (buffer)
+  "Apply velocity to scale and redraw. Stop when velocity is near zero."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (if (< (abs graph-fa2--zoom-velocity) 0.001)
+          (progn
+            (setq graph-fa2--zoom-velocity 0.0)
+            (when graph-fa2--zoom-timer
+              (cancel-timer graph-fa2--zoom-timer)
+              (setq graph-fa2--zoom-timer nil)))
+        
+        (setq graph-fa2--scale 
+              (max 0.05 (* graph-fa2--scale (+ 1.0 graph-fa2--zoom-velocity))))
+        
+        (setq graph-fa2--zoom-velocity (* graph-fa2--zoom-velocity graph-fa2-zoom-friction))
+
+        (graph-fa2--update-display)))))
+
+(defun graph-fa2--start-zoom-inertia ()
+  "Ensure the zoom timer is running for the current buffer."
+  (unless graph-fa2--zoom-timer
+    (let ((buf (current-buffer)))
+      (setq graph-fa2--zoom-timer
+            (run-with-timer 0 0.016 #'graph-fa2--zoom-tick buf)))))
+
 (defun graph-fa2-zoom-in ()
-  "Increase the scale of the rendered graph."
+  "Increase the scale of the rendered graph with momentum."
   (interactive)
-  (setq graph-fa2--scale (* graph-fa2--scale 1.2))
-  (graph-fa2--update-display))
+  (setq graph-fa2--zoom-velocity (+ graph-fa2--zoom-velocity graph-fa2-zoom-acceleration))
+  (graph-fa2--start-zoom-inertia))
 
 (defun graph-fa2-zoom-out ()
-  "Decrease the scale of the rendered graph."
+  "Decrease the scale of the rendered graph with momentum."
   (interactive)
-  (setq graph-fa2--scale (/ graph-fa2--scale 1.2))
-  (graph-fa2--update-display))
+  (setq graph-fa2--zoom-velocity (- graph-fa2--zoom-velocity graph-fa2-zoom-acceleration))
+  (graph-fa2--start-zoom-inertia))
 
 (defun graph-fa2-zoom-reset ()
-  "Reset the graph scale to default."
+  "Reset the graph scale to default and kill any active momentum."
   (interactive)
+  (setq graph-fa2--zoom-velocity 0.0)
+  (when graph-fa2--zoom-timer
+    (cancel-timer graph-fa2--zoom-timer)
+    (setq graph-fa2--zoom-timer nil))
+  
   (setq graph-fa2--scale 1.0)
   (graph-fa2--update-display))
 
