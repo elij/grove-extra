@@ -2,6 +2,8 @@
 
 This is an extension for [Grove](https://github.com/jonathanchu/grove).
 
+It requires [graph-fa2](https://github.com/elij/graph-fa2) to render the force directed graph.
+
 https://github.com/user-attachments/assets/6bdd8aac-201b-49d2-82eb-4d555d665437
 
 ## Features
@@ -15,6 +17,8 @@ https://github.com/user-attachments/assets/6bdd8aac-201b-49d2-82eb-4d555d665437
 ## Quick Start
 
 ```elisp
+(use-package graph-fa2)
+
 (use-package grove
   :bind-keymap ("C-c v" . grove-command-map)
   :custom
