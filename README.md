@@ -9,8 +9,8 @@ https://github.com/user-attachments/assets/6bdd8aac-201b-49d2-82eb-4d555d665437
 ## Features
 - Date format localisation
 - Work with other noting schemas in grove (md+frontmatter, denote, org)
-- Further raph rendering options
-  -  Extra enginer ([mmdr](https://github.com/1jehuang/mermaid-rs-renderer) and no runtime force directed graph [graph-fa2](https://github.com/elij/graph-fa2))
+- Further graph rendering options
+  -  Additional graph engines ([mmdr](https://github.com/1jehuang/mermaid-rs-renderer) and no runtime force directed graph [graph-fa2](https://github.com/elij/graph-fa2))
   - Local graph rendering with `grove-extra-graph-max-distance`
   - Node tag colours with `graph-graph-tag-groups`
 
