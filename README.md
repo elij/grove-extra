@@ -4,7 +4,15 @@ This is an extension for [Grove](https://github.com/jonathanchu/grove).
 
 https://github.com/user-attachments/assets/6bdd8aac-201b-49d2-82eb-4d555d665437
 
-Allows working in md/org, and implements mmdr support and built in fa2 rendering.
+## Features
+- Date format localisation
+- Work with other noting schemas in grove (md+frontmatter, denote, org)
+- Further raph rendering options
+  -  Extra enginer ([mmdr](https://github.com/1jehuang/mermaid-rs-renderer) and no runtime force directed graph [graph-fa2](https://github.com/elij/graph-fa2))
+  - Local graph rendering with `grove-extra-graph-max-distance`
+  - Node tag colours with `graph-graph-tag-groups`
+
+## Quick Start
 
 ```elisp
 (use-package grove
@@ -29,8 +37,3 @@ Allows working in md/org, and implements mmdr support and built in fa2 rendering
   (global-grove-mode 1)
   (grove-extra-mode 1))
 ```
-
-### New Features
-
-- **Local Graph Support**: Pass a numerical prefix argument to `grove-graph` or set `grove-graph-max-distance` to render a subset of the graph surrounding the current buffer. Useful for large workspaces.
-- **Node Tag Colours**: Set `grove-graph-tag-groups` with an alist (e.g. `(("tag" . "#hex"))`) to conditionally colour specific nodes if they possess that tag. Currently applied within the physics engine (fa2).
