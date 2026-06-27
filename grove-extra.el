@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.5.1
+;; Version: 0.5.2
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -16,8 +16,7 @@
 (require 'grove-capture)
 (require 'grove-backlink)
 (require 'json)
-
-;; Try to load FA2 engine if available
+(require 'speedbar)
 (require 'graph-fa2)
 
 (defgroup grove-extra nil
@@ -73,6 +72,11 @@ buffer's node and renders up to this many hops."
 Each element should be of the form (TAG . \"#HEXCODE\").
 Nodes with matching tags will be rendered with the specified colour."
   :type '(alist :key-type string :value-type string)
+  :group 'grove-extra)
+
+(defcustom grove-extra-use-speedbar t
+  "When non-nil, use Speedbar instead of the native grove tree."
+  :type 'boolean
   :group 'grove-extra)
 
 (defvar-local grove-graph--scale 1.0)
@@ -833,6 +837,74 @@ structures and start the engine."
     map)
   "Global keymap for grove-extra-mode.")
 
+(defun grove-extra-speedbar-apply-icons (orig-fun &rest args)
+  "Advise `speedbar-make-tag-line' to apply Grove markers and icons over standard text."
+  (let ((start (point)))
+    (apply orig-fun args)
+    (when (and grove-extra-use-speedbar grove-tree-icons)
+      (save-excursion
+        (goto-char start)
+        (let ((limit (line-end-position)))
+          (cond
+           ((re-search-forward "\\[\\+\\]\\|<\\+>" limit t)
+            (put-text-property (match-beginning 0) (match-end 0) 
+                               'display "▸ \xf114 "))
+           
+           ((progn (goto-char start) (re-search-forward "\\[-\\]\\|<->" limit t))
+            (put-text-property (match-beginning 0) (match-end 0) 
+                               'display "▾ \xf115 "))
+           
+           ((progn (goto-char start) (re-search-forward "\\[\\?\\]" limit t))
+            (put-text-property (match-beginning 0) (match-end 0) 
+                               'display "  \xe612 "))))))))
+
+(defun grove-extra-speedbar-reapply-icon (&rest _args)
+  "Re-apply Grove markers and icons after Speedbar toggles a directory."
+  (when (and grove-extra-use-speedbar grove-tree-icons)
+    (let ((inhibit-read-only t))
+      (save-excursion
+        (beginning-of-line)
+        (let ((limit (line-end-position))
+              (start (point)))
+          (cond
+           ((re-search-forward "\\[\\+\\]\\|<\\+>" limit t)
+            (put-text-property (match-beginning 0) (match-end 0) 
+                               'display "▸ \xf114 "))
+           
+           ((progn (goto-char start) (re-search-forward "\\[-\\]\\|<->" limit t))
+            (put-text-property (match-beginning 0) (match-end 0) 
+                               'display "▾ \xf115 "))))))))
+
+(defun grove-extra-around-tree-open (orig-fun &rest args)
+  "Override native tree creation to launch Speedbar at the vault root."
+  (if grove-extra-use-speedbar
+      (progn
+        (grove--ensure-directory)
+        
+        (let ((exts (if (listp grove-file-extensions) 
+                        grove-file-extensions 
+                      (list grove-file-extensions))))
+          (dolist (ext exts)
+            (speedbar-add-supported-extension (concat "." ext))))
+
+        (let ((default-directory (expand-file-name grove-directory)))
+          (speedbar-window-mode 1))
+        
+        (with-current-buffer speedbar-buffer
+          (setq header-line-format (propertize " Grove" 'face 'bold))
+          (setq default-directory (expand-file-name grove-directory)))
+        
+        (let ((default-directory (expand-file-name grove-directory)))
+          (speedbar-update-contents)))
+    (apply orig-fun args)))
+
+(defun grove-extra-around-tree-close (orig-fun &rest args)
+  "Override native tree closing to close Speedbar."
+  (if grove-extra-use-speedbar
+      (when (and (boundp 'speedbar-buffer) (buffer-live-p speedbar-buffer))
+        (speedbar-window-mode -1))
+    (apply orig-fun args)))
+
 ;;;###autoload
 (define-minor-mode grove-extra-mode
   "Global minor mode providing Markdown, FA2, and advanced search tools for Grove."
@@ -869,7 +941,12 @@ structures and start the engine."
         (advice-add 'grove-search :around #'grove-extra-around-search)
 
         (advice-add 'grove-tree-open :after #'grove-extra--lock-sidebar-windows)
-        (advice-add 'grove-graph :after #'grove-extra--lock-sidebar-windows))
+        (advice-add 'grove-graph :after #'grove-extra--lock-sidebar-windows)
+        (advice-add 'speedbar-make-tag-line :around #'grove-extra-speedbar-apply-icons)
+        (advice-add 'grove-tree-open :around #'grove-extra-around-tree-open)
+        (advice-add 'grove-tree-close :around #'grove-extra-around-tree-close)
+        (advice-add 'speedbar-change-expand-button-char :after #'grove-extra-speedbar-reapply-icon))
+    
     (progn
       (setq-default track-mouse grove-extra--previous-track-mouse)
       
@@ -898,7 +975,11 @@ structures and start the engine."
       (advice-remove 'grove-tree--item-count #'grove-extra-around-tree-item-count)
       (advice-remove 'grove-search #'grove-extra-around-search)
       (advice-remove 'grove-tree-open #'grove-extra--lock-sidebar-windows)
-      (advice-remove 'grove-graph #'grove-extra--lock-sidebar-windows))))
+      (advice-remove 'grove-graph #'grove-extra--lock-sidebar-windows)
+      (advice-remove 'speedbar-make-tag-line #'grove-extra-speedbar-apply-icons)
+      (advice-remove 'grove-tree-open #'grove-extra-around-tree-open)
+      (advice-remove 'grove-tree-close #'grove-extra-around-tree-close)
+      (advice-remove 'speedbar-change-expand-button-char #'grove-extra-speedbar-reapply-icon))))
 
 (provide 'grove-extra)
 ;;; grove-extra.el ends here
