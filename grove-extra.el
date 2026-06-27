@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.5.0
+;; Version: 0.5.1
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -83,8 +83,6 @@ Nodes with matching tags will be rendered with the specified colour."
 (defvar grove-extra-node-hover-functions nil
   "Hook run when the mouse hovers over a new graph node or leaves a node.
 Functions should accept one argument: the NODE-ID string, or nil if empty space.")
-
-(setq grove-link--regexp "\\[\\[\\([^]\n|]+\\)\\(?:|[^]\n]+\\|\\]\\[[^]\n]+\\)?\\]\\]")
 
 (defun grove-extra--tab-line-buffers ()
   "Return a list of grove note buffers for the tab-line, excluding sidebars."
@@ -226,49 +224,71 @@ Functions should accept one argument: the NODE-ID string, or nil if empty space.
     (funcall orig-fun file)))
 
 (defun grove-extra-around-parse-note (orig-fun file)
-  "Parse note with markdown support
-
-  1. Skip obsidian style frontmatter
-  2. Grab org or markdown
-  3. Use fallback if title not found
-  4. Grab tags
-  5. Grab links"
   (if grove-extra-mode
       (let ((mtime (file-attribute-modification-time (file-attributes file)))
+            (ext (downcase (file-name-extension file)))
             title tags links)
         (with-temp-buffer
           (insert-file-contents file)
           
-          (goto-char (point-min))
-          (if (re-search-forward "^\\(?:#\\+title:\\|title:\\)\\s-*\\(.+\\)" nil t)
-              (setq title (string-trim (match-string 1) "[ \t\n\r\"]+"))
+          (if (member ext '("md" "markdown"))
+              (progn
+                (markdown-mode)
+                (goto-char (point-min))
+                (when (fboundp 'markdown-yaml-metadata-alist)
+                  (let ((metadata (markdown-yaml-metadata-alist)))
+                    (setq title (cdr (assoc "title" metadata)))
+                    (let ((raw-tags (cdr (assoc "tags" metadata))))
+                      (when raw-tags
+                        (setq tags (split-string raw-tags "[:,]\\s-*" t "\\s-*"))))))
+                
+                (unless title
+                  (goto-char (point-min))
+                  (when (re-search-forward "^#\\s-+\\(.*\\)" nil t)
+                    (setq title (string-trim (match-string 1)))))
+                
+                (goto-char (point-min))
+                (while (re-search-forward "\\(?:\\[\\[\\([^]|]+\\)\\(?:|[^]]+\\)?\\]\\]\\|\\[[^]]*\\](denote:\\([0-9T]+\\))\\)" nil t)
+                  (let ((wiki-target (match-string-no-properties 1))
+                        (denote-id (match-string-no-properties 2)))
+                    (if denote-id
+                        (if (fboundp 'denote-get-path-by-id)
+                            (let* ((file-path (denote-get-path-by-id denote-id))
+                                   (denote-title (when file-path 
+                                                   (denote-retrieve-title-value file-path 'markdown))))
+                              (push (or denote-title denote-id) links))
+                          (push denote-id links))
+                      (push wiki-target links)))))
             
-            (goto-char (point-min))
-            (when (looking-at-p "^---[ \t]*$")
-              (forward-line 1)
-              (when (re-search-forward "^---[ \t]*$" nil t)
-                (forward-line 1)))
-            
-            (when (re-search-forward "^\\(?:#+\\|\\*+\\)[ \t]+\\(.*\\)" nil t)
-              (setq title (string-trim (match-string 1) "[ \t\n\r\"]+"))))
-          
-          (unless title
-            (setq title (file-name-sans-extension (file-name-nondirectory file))))
-          
-          (goto-char (point-min))
-          (when (re-search-forward "^\\(?:#\\+filetags:\\|tags:\\)\\s-*\\(.+\\)" nil t)
-            (let ((raw-tags (match-string 1)))
-              (setq raw-tags (replace-regexp-in-string "[\\[\\]\"']" "" raw-tags))
-              (setq tags (split-string raw-tags "[:,]\\s-*" t "\\s-*"))))
-          (setq tags (grove--merge-tags tags (grove--collect-inline-tags)))
-          
-          (goto-char (point-min))
-          (while (re-search-forward grove-link--regexp nil t)
-            (let ((target (match-string-no-properties 1)))
-              (push target links)))
-          
-          (list :title title :tags tags :links (nreverse links) :mtime mtime)))
-    (funcall orig-fun file)))
+            (progn
+              (org-mode)
+              (let ((keywords (org-collect-keywords '("TITLE" "FILETAGS"))))
+                (setq title (cadr (assoc "TITLE" keywords)))
+                (let ((raw-tags (cadr (assoc "FILETAGS" keywords))))
+                  (when raw-tags
+                    (setq tags (split-string raw-tags ":" t "\\s-*")))))
+
+              (org-element-map (org-element-parse-buffer) 'link
+                (lambda (link)
+                  (let ((type (org-element-property :type link))
+                        (path (org-element-property :path link)))
+                    (cond
+                     ((member type '("fuzzy" "file"))
+                      (push path links))
+                     
+                     ((and (string= type "denote") (fboundp 'denote-get-path-by-id))
+                      (let* ((file-path (denote-get-path-by-id path))
+                             (denote-title (when file-path 
+                                             (denote-retrieve-title-value file-path 'org))))
+                        (push (or denote-title path) links)))))))
+              
+              (unless title
+                (setq title (file-name-sans-extension (file-name-nondirectory file))))
+              
+              (setq tags (grove--merge-tags tags (grove--collect-inline-tags)))
+              
+              (list :title title :tags tags :links (nreverse links) :mtime mtime)))
+          (funcall orig-fun file)))))
 
 (defun grove-extra-around-refresh-cache (orig-fun)
   (if grove-extra-mode
@@ -379,16 +399,30 @@ Functions should accept one argument: the NODE-ID string, or nil if empty space.
 
 (defun grove-extra-around-link-insert (orig-fun)
   (if grove-extra-mode
-      (progn
+      (cond
+       ((and (fboundp 'denote-link)
+             (buffer-file-name)
+             (string-prefix-p (expand-file-name (denote-directory)) 
+                              (expand-file-name (buffer-file-name))))
+        (call-interactively #'denote-link))
+       
+       ((derived-mode-p 'markdown-mode)
         (grove--refresh-cache)
         (let* ((titles (grove--note-titles))
-               (choice (completing-read "Link to: " (mapcar #'car titles) nil nil))
-               (alias (read-string "Alias (optional): ")))
-          (if (string-empty-p alias)
-              (insert "[[" choice "]]")
-            (if (derived-mode-p 'markdown-mode)
-                (insert "[[" choice "|" alias "]]")
-              (insert "[[" choice "][" alias "]]")))))
+               (completing-read-function
+                (lambda (prompt _collection &rest _args)
+                  (completing-read prompt (mapcar #'car titles) nil nil))))
+          (if (fboundp 'markdown-insert-wiki-link)
+              (call-interactively #'markdown-insert-wiki-link)
+            (call-interactively #'markdown-insert-link))))
+       
+       (t
+        (grove--refresh-cache)
+        (let* ((titles (grove--note-titles))
+               (completing-read-function
+                (lambda (prompt _collection &rest _args)
+                  (completing-read prompt (mapcar #'car titles) nil nil))))
+          (call-interactively #'org-insert-link))))
     (funcall orig-fun)))
 
 (defun grove-extra-around-link-resolve (orig-fun title)
