@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.5.3
+;; Version: 0.5.5
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -46,7 +46,19 @@ Valid options: `dot' (Graphviz), `mmdr' (Mermaid), `fa2' (Animated Physics)."
   :group 'grove-extra)
 
 (defcustom grove-graph-mmdr-direction "TD"
-  "Graph direction when using the mmdr renderer (TD, LR, RL, BT, etc)."
+  "Graph direction when using the mmdr renderer (TD, LR, RL, BT, and others)."
+  :type 'string
+  :group 'grove-extra)
+
+(defcustom grove-graph-bg-color "#282c34"
+  "Background colour for the graph renderer.
+
+Returns a string representing a hex colour code."
+  :type 'string
+  :group 'grove-extra)
+
+(defcustom grove-graph-node-color "#89b4fa"
+  "Node colour for graph renderer"
   :type 'string
   :group 'grove-extra)
 
@@ -115,8 +127,12 @@ Functions should accept one argument: the NODE-ID string, or nil if empty space.
    (buffer-list)))
 
 (defun grove-extra--lock-sidebar-windows (&rest _)
-  "Make Grove sidebar windows strongly dedicated to prevent buffer swapping."
-  (dolist (buf-name '("*grove-tree*" "*grove-graph*"))
+  "Make Grove sidebar windows strongly dedicated to prevent buffer swapping.
+Specifically targeting the leading space buffer for speedbar and the graph buffer.
+
+_ : Ignored arguments.
+Returns nil."
+  (dolist (buf-name '(" *SPEEDBAR*" "*grove-graph*"))
     (let ((win (get-buffer-window buf-name)))
       (when win
         (set-window-dedicated-p win t)))))
@@ -528,6 +544,22 @@ Functions should accept one argument: the NODE-ID string, or nil if empty space.
             (save-buffer))))
     (funcall orig-fun time)))
 
+(defun grove-extra-around-open-initial-note (orig-fun)
+  "Override initial note selection to support Markdown daily notes.
+
+ORIG-FUN: The original `grove--open-initial-note` function.
+Returns the newly opened buffer or nil."
+  (if grove-extra-mode
+      (let ((daily (expand-file-name 
+                    (concat (format-time-string grove-daily-format) "." grove-default-extension) 
+                    (grove--daily-path))))
+        (cond
+         ((file-exists-p daily) (find-file daily))
+         ((let ((notes (grove--note-titles)))
+            (when notes (find-file (cdar notes)) t)))
+         (t (grove--show-welcome))))
+    (funcall orig-fun)))
+
 (defun grove-extra-around-ui-home (orig-fun)
   (if grove-extra-mode
       (let ((daily (expand-file-name (concat (format-time-string grove-daily-format) "." grove-default-extension) (grove--daily-path))))
@@ -684,7 +716,7 @@ Functions should accept one argument: the NODE-ID string, or nil if empty space.
 
 (defun grove-extra--get-node-colour (tags)
   "Determine the node colour based on TAGS and grove-graph-tag-groups."
-  (let ((colour "#89b4fa"))
+  (let ((colour grove-graph-node-color))
     (when (and (boundp 'grove-graph-tag-groups) grove-graph-tag-groups)
       (catch 'found
         (dolist (group grove-graph-tag-groups)
@@ -936,8 +968,22 @@ structures and start the engine."
 (with-eval-after-load 'speedbar
   (speedbar-add-expansion-list '("Grove" grove-speedbar-menu grove-speedbar-key-map grove-speedbar-buttons)))
 
+(defun grove-extra-around-set-current-file (orig-fun file)
+  "Redirect the native tree highlight request to Speedbar.
+
+ORIG-FUN: The original `grove-tree--set-current-file` function.
+FILE: The file path to highlight.
+Returns nil."
+  (if grove-extra-use-speedbar
+      (grove-speedbar-track-current-file)
+    (funcall orig-fun file)))
+
 (defun grove-extra-around-tree-open (orig-fun &rest args)
-  "Override native tree creation to launch Speedbar in the Grove display mode."
+  "Override native tree creation to launch Speedbar in the Grove display mode.
+
+ORIG-FUN: The original `grove-tree-open` function.
+ARGS: Additional arguments passed to the original function.
+Returns nil."
   (if grove-extra-use-speedbar
       (progn
         (grove--ensure-directory)
@@ -947,17 +993,25 @@ structures and start the engine."
         
         (with-current-buffer speedbar-buffer
           (speedbar-change-initial-expansion-list "Grove")
-          (speedbar-update-contents)))
+          (speedbar-update-contents))
+        (add-hook 'window-selection-change-functions #'grove-speedbar-track-current-file))
     (apply orig-fun args)))
 
 (defun grove-extra-around-tree-close (orig-fun &rest args)
-  "Override native tree closing to close the docked Speedbar."
+  "Override native tree closing to close the docked Speedbar.
+Also disables file monitoring in the speedbar by removing the window change hook.
+
+ORIG-FUN: The original `grove-tree-close` function.
+ARGS: Additional arguments passed to the original function.
+Returns nil."
   (if grove-extra-use-speedbar
-      (when (and (boundp 'speedbar-buffer) (buffer-live-p speedbar-buffer))
-        (let ((win (get-buffer-window speedbar-buffer)))
-          (when win
-            (delete-window win)))
-        (kill-buffer speedbar-buffer))
+      (progn
+        (remove-hook 'window-selection-change-functions #'grove-speedbar-track-current-file)
+        (when (and (boundp 'speedbar-buffer) (buffer-live-p speedbar-buffer))
+          (let ((win (get-buffer-window speedbar-buffer)))
+            (when win
+              (delete-window win)))
+          (kill-buffer speedbar-buffer)))
     (apply orig-fun args)))
 
 (defun grove-speedbar-track-current-file (&rest _)
@@ -981,7 +1035,6 @@ structures and start the engine."
         (add-hook 'grove-graph-mode-hook #'grove-extra--enable-graph-mode)
         (add-hook 'grove-capture-mode-hook #'grove-extra--enable-capture-mode)
         (add-hook 'find-file-hook #'grove-extra--turn-on-hook)
-        (add-hook 'window-selection-change-functions #'grove-speedbar-track-current-file)
         
         (advice-add 'grove--parse-note :around #'grove-extra-around-parse-note)
         (advice-add 'grove--refresh-cache :around #'grove-extra-around-refresh-cache)
@@ -995,6 +1048,7 @@ structures and start the engine."
         (advice-add 'grove-capture :around #'grove-extra-around-capture)
         (advice-add 'grove-capture-finalize :around #'grove-extra-around-capture-finalize)
         (advice-add 'grove-daily :around #'grove-extra-around-daily)
+        (advice-add 'grove--open-initial-note :around #'grove-extra-around-open-initial-note)
         (advice-add 'grove-ui-home :around #'grove-extra-around-ui-home)
         (advice-add 'grove-graph--adjacency-list :around #'grove-extra-around-graph-adjacency-list)
         (advice-add 'grove-graph :around #'grove-extra-around-graph)
@@ -1005,6 +1059,7 @@ structures and start the engine."
         (advice-add 'grove-search :around #'grove-extra-around-search)
         (advice-add 'grove-tree-open :after #'grove-extra--lock-sidebar-windows)
         (advice-add 'grove-graph :after #'grove-extra--lock-sidebar-windows)
+        (advice-add 'grove-tree--set-current-file :around #'grove-extra-around-set-current-file)
         (advice-add 'grove-tree-open :around #'grove-extra-around-tree-open)
         (advice-add 'grove-tree-close :around #'grove-extra-around-tree-close)
         (advice-add 'speedbar-position-cursor-on-line :after #'grove-extra-speedbar-snap-cursor))
@@ -1015,7 +1070,6 @@ structures and start the engine."
       (remove-hook 'grove-graph-mode-hook #'grove-extra--enable-graph-mode)
       (remove-hook 'grove-capture-mode-hook #'grove-extra--enable-capture-mode)
       (remove-hook 'find-file-hook #'grove-extra--turn-on-hook)
-      (remove-hook 'window-selection-change-functions #'grove-speedbar-track-current-file)
       
       (advice-remove 'grove--parse-note #'grove-extra-around-parse-note)
       (advice-remove 'grove--refresh-cache #'grove-extra-around-refresh-cache)
@@ -1029,6 +1083,7 @@ structures and start the engine."
       (advice-remove 'grove-capture #'grove-extra-around-capture)
       (advice-remove 'grove-capture-finalize #'grove-extra-around-capture-finalize)
       (advice-remove 'grove-daily #'grove-extra-around-daily)
+      (advice-remove 'grove--open-initial-note #'grove-extra-around-open-initial-note)
       (advice-remove 'grove-ui-home #'grove-extra-around-ui-home)
       (advice-remove 'grove-graph--adjacency-list #'grove-extra-around-graph-adjacency-list)
       (advice-remove 'grove-graph #'grove-extra-around-graph)
@@ -1039,6 +1094,7 @@ structures and start the engine."
       (advice-remove 'grove-search #'grove-extra-around-search)
       (advice-remove 'grove-tree-open #'grove-extra--lock-sidebar-windows)
       (advice-remove 'grove-graph #'grove-extra--lock-sidebar-windows)
+      (advice-remove 'grove-tree--set-current-file #'grove-extra-around-set-current-file)
       (advice-remove 'grove-tree-open #'grove-extra-around-tree-open)
       (advice-remove 'grove-tree-close #'grove-extra-around-tree-close)
       (advice-remove 'speedbar-position-cursor-on-line #'grove-extra-speedbar-snap-cursor))))
