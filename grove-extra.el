@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.5.5
+;; Version: 0.5.7
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -135,7 +135,9 @@ Returns nil."
   (dolist (buf-name '(" *SPEEDBAR*" "*grove-graph*"))
     (let ((win (get-buffer-window buf-name)))
       (when win
-        (set-window-dedicated-p win t)))))
+        (set-window-dedicated-p win t)
+        (set-window-parameter win 'no-delete-other-windows t)
+        (set-window-parameter win 'no-other-window nil)))))
 
 (defun grove-extra--make-ci-regexp (str)
   "Create a case-insensitive regexp string from STR."
@@ -830,7 +832,7 @@ structures and start the engine."
               (let* ((prepared (grove-extra--prepare-graph-data adjacency))
                      (nodes (plist-get prepared :nodes))
                      (edges (plist-get prepared :edges)))
-                (graph-fa2-start buf nodes edges :cache-dir (expand-file-name ".cache" grove-directory)))
+                (graph-fa2-start buf nodes edges :cache-dir (expand-file-name ".cache" grove-directory) :bg-color grove-graph-bg-color :node-color grove-graph-node-color))
             (let* ((markup (if (eq grove-graph-renderer 'mmdr)
                                (grove-graph--generate-mermaid adjacency)
                              (grove-graph--generate-dot adjacency)))
@@ -861,7 +863,7 @@ structures and start the engine."
         
         (add-text-properties 
          (point-min) (point-max) 
-         (list 'display (create-image encoded-svg 'svg t)
+         (list 'display (create-image encoded-svg 'svg t :background grove-graph-bg-color)
                'pointer (if grove-extra--hovered-node 'hand nil)))))))
 
 (defun grove-graph--adjust-svg-dimensions (svg-string width height)
@@ -942,6 +944,7 @@ structures and start the engine."
 (defun grove-extra-speedbar-snap-cursor (&rest _args)
   "Nudge the cursor onto the text button."
   (when (and grove-extra-use-speedbar
+             (fboundp 'speedbar-window)
              (looking-at-p " ")
              (not (eolp)))
     (forward-char 1)))
@@ -974,7 +977,7 @@ structures and start the engine."
 ORIG-FUN: The original `grove-tree--set-current-file` function.
 FILE: The file path to highlight.
 Returns nil."
-  (if grove-extra-use-speedbar
+  (if (and grove-extra-use-speedbar (fboundp 'speedbar-window))
       (grove-speedbar-track-current-file)
     (funcall orig-fun file)))
 
@@ -984,7 +987,7 @@ Returns nil."
 ORIG-FUN: The original `grove-tree-open` function.
 ARGS: Additional arguments passed to the original function.
 Returns nil."
-  (if grove-extra-use-speedbar
+  (if (and grove-extra-use-speedbar (fboundp 'speedbar-window))
       (progn
         (grove--ensure-directory)
         (if (fboundp 'speedbar-window-mode)
@@ -1004,7 +1007,7 @@ Also disables file monitoring in the speedbar by removing the window change hook
 ORIG-FUN: The original `grove-tree-close` function.
 ARGS: Additional arguments passed to the original function.
 Returns nil."
-  (if grove-extra-use-speedbar
+  (if (and grove-extra-use-speedbar (fboundp 'speedbar-window))
       (progn
         (remove-hook 'window-selection-change-functions #'grove-speedbar-track-current-file)
         (when (and (boundp 'speedbar-buffer) (buffer-live-p speedbar-buffer))
@@ -1017,6 +1020,7 @@ Returns nil."
 (defun grove-speedbar-track-current-file (&rest _)
   "Refresh Speedbar to update the currently highlighted file when windows change."
   (when (and grove-extra-use-speedbar
+             (fboundp 'speedbar-window)
              (boundp 'speedbar-buffer)
              (buffer-live-p speedbar-buffer))
     (with-current-buffer speedbar-buffer
