@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.5.7
+;; Version: 0.5.8
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -307,18 +307,18 @@ Returns nil."
                     (setq tags (split-string raw-tags ":" t "\\s-*")))))
 
               (org-element-map (org-element-parse-buffer) 'link
-                (lambda (link)
-                  (let ((type (org-element-property :type link))
-                        (path (org-element-property :path link)))
-                    (cond
-                     ((member type '("fuzzy" "file"))
-                      (push path links))
-                     
-                     ((and (string= type "denote") (fboundp 'denote-get-path-by-id))
-                      (let* ((file-path (denote-get-path-by-id path))
-                             (denote-title (when file-path 
-                                             (denote-retrieve-title-value file-path 'org))))
-                        (push (or denote-title path) links)))))))
+                               (lambda (link)
+                                 (let ((type (org-element-property :type link))
+                                       (path (org-element-property :path link)))
+                                   (cond
+                                    ((member type '("fuzzy" "file"))
+                                     (push path links))
+                                    
+                                    ((and (string= type "denote") (fboundp 'denote-get-path-by-id))
+                                     (let* ((file-path (denote-get-path-by-id path))
+                                            (denote-title (when file-path 
+                                                            (denote-retrieve-title-value file-path 'org))))
+                                       (push (or denote-title path) links)))))))
               
               (unless title
                 (setq title (file-name-sans-extension (file-name-nondirectory file))))
@@ -832,7 +832,7 @@ structures and start the engine."
               (let* ((prepared (grove-extra--prepare-graph-data adjacency))
                      (nodes (plist-get prepared :nodes))
                      (edges (plist-get prepared :edges)))
-                (graph-fa2-start buf nodes edges :cache-dir (expand-file-name ".cache" grove-directory) :bg-color grove-graph-bg-color :node-color grove-graph-node-color))
+                (graph-fa2-start buf nodes edges :cache-dir (expand-file-name ".cache" grove-directory)))
             (let* ((markup (if (eq grove-graph-renderer 'mmdr)
                                (grove-graph--generate-mermaid adjacency)
                              (grove-graph--generate-dot adjacency)))
@@ -1020,6 +1020,7 @@ Returns nil."
 (defun grove-speedbar-track-current-file (&rest _)
   "Refresh Speedbar to update the currently highlighted file when windows change."
   (when (and grove-extra-use-speedbar
+             (not (window-minibuffer-p))
              (fboundp 'speedbar-window)
              (boundp 'speedbar-buffer)
              (buffer-live-p speedbar-buffer))
@@ -1070,7 +1071,8 @@ Returns nil."
     
     (progn
       (setq-default track-mouse grove-extra--previous-track-mouse)
-      
+
+      (remove-hook 'window-selection-change-functions #'grove-speedbar-track-current-file)
       (remove-hook 'grove-graph-mode-hook #'grove-extra--enable-graph-mode)
       (remove-hook 'grove-capture-mode-hook #'grove-extra--enable-capture-mode)
       (remove-hook 'find-file-hook #'grove-extra--turn-on-hook)
