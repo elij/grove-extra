@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.5.8
+;; Version: 0.5.9
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -96,6 +96,7 @@ Nodes with matching tags will be rendered with the specified colour."
 (defvar-local grove-graph--raw-svg nil)
 (defvar-local grove-extra--hovered-node nil)
 
+(defvar consult-ripgrep-args)
 (defvar grove-extra--previous-track-mouse nil)
 (defvar grove-extra-node-hover-functions nil
   "Hook run when the mouse hovers over a new graph node or leaves a node.
@@ -153,10 +154,10 @@ Returns nil."
   (let ((valid-exts (if (listp grove-file-extensions)
                         grove-file-extensions
                       (list grove-file-extensions))))
-    (concat "\\`[^.].*\\.\\(" 
-            (mapconcat #'grove-extra--make-ci-regexp 
-                       (mapcar (lambda (s) (format "%s" s)) valid-exts) 
-                       "\\|") 
+    (concat "\\`[^.].*\\.\\("
+            (mapconcat #'grove-extra--make-ci-regexp
+                       (mapcar (lambda (s) (format "%s" s)) valid-exts)
+                       "\\|")
             "\\)\\'")))
 
 (defun grove-extra--valid-extension-p (filename)
@@ -190,14 +191,14 @@ Returns nil."
   :init-value nil
   :lighter " Graph+"
   (if grove-extra-graph-mode
-      
+
       (progn
         (setq-local cursor-type nil)
         (setq-local bidi-display-reordering nil)
         (if (not (eq grove-graph-renderer 'fa2))
             (use-local-map grove-graph-mode-map)
           )
-        
+
         (setq-local top-margin-width 0
                     bottom-margin-height 0
                     left-margin-width 0
@@ -205,16 +206,16 @@ Returns nil."
         (when (get-buffer-window (current-buffer) t)
           (set-window-buffer (get-buffer-window (current-buffer) t) (current-buffer)))
 
-        (setq-local grove-extra--face-cookie 
+        (setq-local grove-extra--face-cookie
                     (face-remap-add-relative 'default :background grove-graph-bg-color))
         (add-hook 'kill-buffer-hook #'grove-extra--graph-cleanup nil t)
         (add-hook 'window-size-change-functions #'grove-graph--update-display nil t)
-        
+
         (add-hook 'graph-fa2-node-clicked-functions #'grove-extra--handle-node-clicked nil t))
     (progn
       (kill-local-variable 'cursor-type)
       (kill-local-variable 'bidi-display-reordering)
-      
+
       (kill-local-variable 'top-margin-width)
       (kill-local-variable 'bottom-margin-height)
       (kill-local-variable 'left-margin-width)
@@ -226,7 +227,7 @@ Returns nil."
         (face-remap-remove-relative grove-extra--face-cookie))
       (remove-hook 'kill-buffer-hook #'grove-extra--graph-cleanup t)
       (remove-hook 'window-size-change-functions #'grove-graph--update-display t)
-      
+
       (remove-hook 'graph-fa2-node-clicked-functions #'grove-extra--handle-node-clicked t))))
 
 (defun grove-extra--enable-graph-mode ()
@@ -268,7 +269,7 @@ Returns nil."
             title tags links)
         (with-temp-buffer
           (insert-file-contents file)
-          
+
           (if (member ext '("md" "markdown"))
               (progn
                 (markdown-mode)
@@ -279,12 +280,12 @@ Returns nil."
                     (let ((raw-tags (cdr (assoc "tags" metadata))))
                       (when raw-tags
                         (setq tags (split-string raw-tags "[:,]\\s-*" t "\\s-*"))))))
-                
+
                 (unless title
                   (goto-char (point-min))
                   (when (re-search-forward "^#\\s-+\\(.*\\)" nil t)
                     (setq title (string-trim (match-string 1)))))
-                
+
                 (goto-char (point-min))
                 (while (re-search-forward "\\(?:\\[\\[\\([^]|]+\\)\\(?:|[^]]+\\)?\\]\\]\\|\\[[^]]*\\](denote:\\([0-9T]+\\))\\)" nil t)
                   (let ((wiki-target (match-string-no-properties 1))
@@ -297,7 +298,7 @@ Returns nil."
                               (push (or denote-title denote-id) links))
                           (push denote-id links))
                       (push wiki-target links)))))
-            
+
             (progn
               (org-mode)
               (let ((keywords (org-collect-keywords '("TITLE" "FILETAGS"))))
@@ -307,26 +308,26 @@ Returns nil."
                     (setq tags (split-string raw-tags ":" t "\\s-*")))))
 
               (org-element-map (org-element-parse-buffer) 'link
-                               (lambda (link)
-                                 (let ((type (org-element-property :type link))
-                                       (path (org-element-property :path link)))
-                                   (cond
-                                    ((member type '("fuzzy" "file"))
-                                     (push path links))
-                                    
-                                    ((and (string= type "denote") (fboundp 'denote-get-path-by-id))
-                                     (let* ((file-path (denote-get-path-by-id path))
-                                            (denote-title (when file-path 
-                                                            (denote-retrieve-title-value file-path 'org))))
-                                       (push (or denote-title path) links)))))))
-              
+                (lambda (link)
+                  (let ((type (org-element-property :type link))
+                        (path (org-element-property :path link)))
+                    (cond
+                     ((member type '("fuzzy" "file"))
+                      (push path links))
+
+                     ((and (string= type "denote") (fboundp 'denote-get-path-by-id))
+                      (let* ((file-path (denote-get-path-by-id path))
+                             (denote-title (when file-path
+                                             (denote-retrieve-title-value file-path 'org))))
+                        (push (or denote-title path) links)))))))
+
               (unless title
                 (setq title (file-name-sans-extension (file-name-nondirectory file))))
-              
-              (setq tags (grove--merge-tags tags (grove--collect-inline-tags)))
-              
-              (list :title title :tags tags :links (nreverse links) :mtime mtime)))
-          (funcall orig-fun file)))))
+
+              (setq tags (grove--merge-tags tags (grove--collect-inline-tags)))))
+
+          (list :title title :tags tags :links (nreverse links) :mtime mtime)))
+    (funcall orig-fun file)))
 
 (defun grove-extra-around-refresh-cache (orig-fun)
   (if grove-extra-mode
@@ -440,10 +441,10 @@ Returns nil."
       (cond
        ((and (fboundp 'denote-link)
              (buffer-file-name)
-             (string-prefix-p (expand-file-name (denote-directory)) 
+             (string-prefix-p (expand-file-name (denote-directory))
                               (expand-file-name (buffer-file-name))))
         (call-interactively #'denote-link))
-       
+
        ((derived-mode-p 'markdown-mode)
         (grove--refresh-cache)
         (let* ((titles (grove--note-titles))
@@ -453,7 +454,7 @@ Returns nil."
           (if (fboundp 'markdown-insert-wiki-link)
               (call-interactively #'markdown-insert-wiki-link)
             (call-interactively #'markdown-insert-link))))
-       
+
        (t
         (grove--refresh-cache)
         (let* ((titles (grove--note-titles))
@@ -464,28 +465,56 @@ Returns nil."
     (funcall orig-fun)))
 
 (defun grove-extra-around-link-resolve (orig-fun title)
-  (if grove-extra-mode
-      (progn
-        (grove--refresh-cache)
-        (let ((matches
-               (cl-remove-if-not
-                (lambda (pair)
-                  (let* ((note-title (car pair))
-                         (full-path (cdr pair))
-                         (rel-path (file-relative-name full-path grove-directory))
-                         (rel-no-ext (file-name-sans-extension rel-path)))
-                    (or (string-equal-ignore-case note-title title)
-                        (string-equal-ignore-case rel-no-ext title)
-                        (string-equal-ignore-case rel-path title))))
-                (grove--note-titles))))
-          (cond
-           ((null matches) nil)
-           ((= (length matches) 1) (cdar matches))
-           (t (let ((choice (completing-read "Multiple matches. Choose file: "
-                                             (mapcar (lambda (m) (file-relative-name (cdr m) grove-directory)) matches)
-                                             nil t)))
-                (expand-file-name choice grove-directory))))))
-    (funcall orig-fun title)))
+  "Resolve TITLE to a file path, supporting Obsidian aliases and subdirectories.
+
+This function advises `grove-link--resolve'. It intercepts the raw TITLE string
+and performs normalizations to bridge Obsidian and Grove conventions.
+
+Normalisations applied:
+- Splits the string at the pipe character (|) to strip Obsidian visual aliases.
+- Trims surrounding whitespace from the core target to prevent strict match failures.
+- Isolates filenames from their directory paths to allow flat-resolution matching
+  across nested submodules.
+- Compares the cleaned target against note metadata, relative paths, literal names,
+  and aggressively sanitised filenames.
+
+If a single match is found, returns the absolute path. If multiple matches exist,
+prompts the user to choose. Returns nil if no match is found. If `grove-extra-mode'
+is disabled, defers entirely to ORIG-FUN."
+  (if (not grove-extra-mode)
+      (funcall orig-fun title)
+    (grove--refresh-cache)
+    (if-let*
+        ((clean-title (string-trim (car (split-string title "|"))))
+         (sanitized-title (grove--sanitize-filename clean-title))
+         (matches
+          (cl-remove-if-not
+           (lambda (pair)
+             (if-let*
+                 ((note-title (or (car pair) ""))
+                  (full-path (cdr pair))
+                  (rel-path (file-relative-name full-path grove-directory))
+                  (rel-no-ext (file-name-sans-extension rel-path))
+                  (filename-only
+                   (file-name-sans-extension (file-name-nondirectory full-path)))
+                  (sanitized-filename (grove--sanitize-filename filename-only)))
+                 (or (string-equal-ignore-case note-title clean-title)
+                     (string-equal-ignore-case rel-no-ext clean-title)
+                     (string-equal-ignore-case rel-path clean-title)
+                     (string-equal-ignore-case filename-only clean-title)
+                     (string-equal-ignore-case sanitized-filename sanitized-title))))
+           (grove--note-titles))))
+
+        (if (= (length matches) 1)
+            (cdar matches)
+          (let
+              ((choice
+                (completing-read
+                 "Multiple matches. Choose file: "
+                 (mapcar (lambda (m) (file-relative-name (cdr m) grove-directory)) matches)
+                 nil t)))
+            (expand-file-name choice grove-directory)))
+      nil)))
 
 (defun grove-extra-around-capture (orig-fun)
   (if grove-extra-mode
@@ -552,7 +581,7 @@ Returns nil."
 ORIG-FUN: The original `grove--open-initial-note` function.
 Returns the newly opened buffer or nil."
   (if grove-extra-mode
-      (let ((daily (expand-file-name 
+      (let ((daily (expand-file-name
                     (concat (format-time-string grove-daily-format) "." grove-default-extension) 
                     (grove--daily-path))))
         (cond
@@ -593,7 +622,7 @@ Returns the newly opened buffer or nil."
                        (setq filename (file-name-sans-extension (file-name-nondirectory path)))))
                    grove--cache))
         (unless filename (setq filename title))
-        
+
         (let* ((title-pat (regexp-quote title))
                (file-pat (regexp-quote filename))
                (pattern (if (string= title-pat file-pat)
@@ -605,7 +634,7 @@ Returns the newly opened buffer or nil."
                              globs (list pattern grove-directory)))
                (ext-re (mapconcat #'grove-extra--make-ci-regexp valid-exts "\\|"))
                results current-file)
-          
+
           (with-temp-buffer
             (let ((exit-code (apply #'process-file grove-backlink-ripgrep-executable nil t nil args)))
               (unless (member exit-code '(0 1 2))
@@ -654,13 +683,13 @@ Returns the newly opened buffer or nil."
         (let ((adjacency (make-hash-table :test #'equal))
               (all-titles (make-hash-table :test #'equal))
               (resolution-map (make-hash-table :test #'equal)))
-          
+
           (maphash (lambda (path meta)
                      (let* ((title (plist-get meta :title))
                             (rel-path (file-relative-name path grove-directory))
                             (rel-no-ext (file-name-sans-extension rel-path))
                             (filename-no-ext (file-name-sans-extension (file-name-nondirectory path))))
-                       
+
                        (when (stringp title)
                          (puthash title t all-titles)
                          (puthash (downcase title) title resolution-map)
@@ -669,7 +698,7 @@ Returns the newly opened buffer or nil."
                            (puthash (downcase rel-no-ext) title resolution-map)
                            (puthash (downcase filename-no-ext) title resolution-map)))))
                    grove--cache)
-          
+
           (maphash (lambda (_path meta)
                      (let ((source (plist-get meta :title))
                            (links (plist-get meta :links)))
@@ -679,7 +708,7 @@ Returns the newly opened buffer or nil."
                              (when (and resolved-target (gethash resolved-target all-titles))
                                (push resolved-target (gethash source adjacency))))))))
                    grove--cache)
-          
+
           (let (result)
             (maphash (lambda (title _) (push (cons title (gethash title adjacency)) result)) all-titles)
             (let ((max-hops (if (numberp current-prefix-arg) current-prefix-arg grove-graph-max-distance))
@@ -856,13 +885,13 @@ structures and start the engine."
            (sized-svg (grove-graph--adjust-svg-dimensions grove-graph--raw-svg width height)))
       (when (= (buffer-size) 0) (insert " "))
       (let* ((max-image-size nil)
-             (encoded-svg (if (multibyte-string-p sized-svg) 
-                              (encode-coding-string sized-svg 'utf-8) 
+             (encoded-svg (if (multibyte-string-p sized-svg)
+                              (encode-coding-string sized-svg 'utf-8)
                             sized-svg)))
         (clear-image-cache)
-        
-        (add-text-properties 
-         (point-min) (point-max) 
+
+        (add-text-properties
+         (point-min) (point-max)
          (list 'display (create-image encoded-svg 'svg t :background grove-graph-bg-color)
                'pointer (if grove-extra--hovered-node 'hand nil)))))))
 
@@ -892,7 +921,7 @@ structures and start the engine."
   (let* ((entries (grove-tree--list-entries directory depth))
          (current-file (let ((win (or (grove-tree--main-window) (next-window))))
                          (and win (window-buffer win) (buffer-file-name (window-buffer win))))))
-    
+
     (dolist (node entries)
       (let* ((path (grove-tree-node-path node))
              (name (grove-tree-node-name node))
@@ -900,13 +929,13 @@ structures and start the engine."
              (expanded (gethash path grove-speedbar-expanded))
              (use-icons (and (boundp 'grove-tree-icons) grove-tree-icons))
              (indent-spaces (make-string (* depth 2) ?\s)))
-        
+
         (let ((start (point)))
           (insert (int-to-string depth) ":")
           (put-text-property start (point) 'invisible t))
-        
+
         (insert indent-spaces)
-        
+
         (let* ((start (point))
                (icon-str (if dir-p
                              (if expanded
@@ -914,15 +943,15 @@ structures and start the engine."
                                (if use-icons "▸ \xf114" "[+]"))
                            (if use-icons "  \xe612" " ? ")))
                (end (progn (insert icon-str) (point))))
-          
+
           (speedbar-make-button start end
                                 (if dir-p 'speedbar-button-face 'speedbar-file-face)
                                 'highlight
                                 (if dir-p #'grove-speedbar-toggle-dir #'grove-speedbar-open-file)
                                 path))
-        
+
         (insert " ")
-        
+
         (let* ((start (point))
                (label-str (if dir-p
                               (format "%s (%d)" name (grove-tree--item-count path))
@@ -931,13 +960,13 @@ structures and start the engine."
                (face (cond (dir-p 'speedbar-directory-face)
                            ((and current-file (string= path current-file)) 'speedbar-selected-face)
                            (t 'speedbar-file-face))))
-          
+
           (speedbar-make-button start end face 'highlight
                                 (if dir-p #'grove-speedbar-toggle-dir #'grove-speedbar-open-file)
                                 path))
-        
+
         (insert "\n")
-        
+
         (when (and dir-p expanded)
           (grove-speedbar-insert-dir path (1+ depth)))))))
 
@@ -993,7 +1022,7 @@ Returns nil."
         (if (fboundp 'speedbar-window-mode)
             (speedbar-window-mode 1)
           (speedbar 1))
-        
+
         (with-current-buffer speedbar-buffer
           (speedbar-change-initial-expansion-list "Grove")
           (speedbar-update-contents))
@@ -1036,11 +1065,11 @@ Returns nil."
       (progn
         (setq grove-extra--previous-track-mouse (default-value 'track-mouse))
         (setq-default track-mouse t)
-        
+
         (add-hook 'grove-graph-mode-hook #'grove-extra--enable-graph-mode)
         (add-hook 'grove-capture-mode-hook #'grove-extra--enable-capture-mode)
         (add-hook 'find-file-hook #'grove-extra--turn-on-hook)
-        
+
         (advice-add 'grove--parse-note :around #'grove-extra-around-parse-note)
         (advice-add 'grove--refresh-cache :around #'grove-extra-around-refresh-cache)
         (advice-add 'grove-file-p :around #'grove-extra-around-file-p)
@@ -1068,7 +1097,7 @@ Returns nil."
         (advice-add 'grove-tree-open :around #'grove-extra-around-tree-open)
         (advice-add 'grove-tree-close :around #'grove-extra-around-tree-close)
         (advice-add 'speedbar-position-cursor-on-line :after #'grove-extra-speedbar-snap-cursor))
-    
+
     (progn
       (setq-default track-mouse grove-extra--previous-track-mouse)
 
@@ -1076,7 +1105,7 @@ Returns nil."
       (remove-hook 'grove-graph-mode-hook #'grove-extra--enable-graph-mode)
       (remove-hook 'grove-capture-mode-hook #'grove-extra--enable-capture-mode)
       (remove-hook 'find-file-hook #'grove-extra--turn-on-hook)
-      
+
       (advice-remove 'grove--parse-note #'grove-extra-around-parse-note)
       (advice-remove 'grove--refresh-cache #'grove-extra-around-refresh-cache)
       (advice-remove 'grove-file-p #'grove-extra-around-file-p)
