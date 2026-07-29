@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.5.9
+;; Version: 0.5.10
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -241,15 +241,10 @@ Returns nil."
   :init-value nil
   :lighter " Cap+"
   (if grove-extra-capture-mode
-      (progn
-        (if (string= (downcase grove-default-extension) "md")
-            (when (fboundp 'markdown-mode) (markdown-mode))
-          (when (fboundp 'org-mode) (org-mode)))
-        (setq-local header-line-format
-                    (substitute-command-keys
-                     "Capture: \\[grove-capture-finalize] to save, \\[grove-capture-cancel] to discard")))
-    (progn
-      (kill-local-variable 'header-line-format))))
+      (setq-local header-line-format
+                  (substitute-command-keys
+                   "Capture: \\[grove-capture-finalize] to save, \\[grove-capture-cancel] to discard"))
+    (kill-local-variable 'header-line-format)))
 
 (defun grove-extra--enable-capture-mode ()
   "Turn on the extra capture features if the global mode is active."
@@ -522,7 +517,16 @@ is disabled, defers entirely to ORIG-FUN."
         (grove--ensure-directory)
         (let ((buf (get-buffer-create "*grove-capture*")))
           (switch-to-buffer buf)
+          
+          ;; 1. Set the major mode FIRST so `kill-all-local-variables` runs now
+          (if (string= (downcase grove-default-extension) "md")
+              (when (fboundp 'markdown-mode) (markdown-mode))
+            (when (fboundp 'org-mode) (org-mode)))
+          
+          ;; 2. Enable the minor modes safely
           (grove-capture-mode 1)
+          
+          ;; 3. Insert the template
           (let ((inhibit-read-only t)) (erase-buffer))
           (insert "Title\n\nContent")
           (goto-char (point-min))
@@ -653,6 +657,17 @@ Returns the newly opened buffer or nil."
           (cl-remove-if (lambda (r) (and current-file (string= (plist-get r :file) current-file))) (nreverse results))))
     (funcall orig-fun title filename)))
 
+(defun grove-extra-around-backlink-title (orig-fun file)
+  "Safely retrieve the title for a file, falling back to the filename if nil."
+  (if grove-extra-mode
+      (let* ((meta (gethash file grove--cache))
+             (title (when meta (plist-get meta :title))))
+        ;; Ensure the title is strictly a non-empty string, otherwise fallback
+        (if (and title (stringp title) (not (string-empty-p title)))
+            title
+          (file-name-sans-extension (file-name-nondirectory file))))
+    (funcall orig-fun file)))
+
 (defun grove-extra-around-backlinks (orig-fun)
   (if grove-extra-mode
       (progn
@@ -676,6 +691,7 @@ Returns the newly opened buffer or nil."
     (funcall orig-fun)))
 
 (defun grove-extra-around-graph-adjacency-list (orig-fun)
+  "Build an adjacency list for the graph, unifying link resolution and handling nil titles."
   (if grove-extra-mode
       (progn
         (grove--ensure-directory)
@@ -683,39 +699,61 @@ Returns the newly opened buffer or nil."
         (let ((adjacency (make-hash-table :test #'equal))
               (all-titles (make-hash-table :test #'equal))
               (resolution-map (make-hash-table :test #'equal)))
-
+          
+          ;; PASS 1: Build the dictionary with sanitized fallbacks and nil protection
           (maphash (lambda (path meta)
-                     (let* ((title (plist-get meta :title))
+                     (let* ((raw-title (plist-get meta :title))
+                            (filename-no-ext (file-name-sans-extension (file-name-nondirectory path)))
+                            ;; FIX: Fallback to filename if title is missing from cache
+                            (title (if (and raw-title (stringp raw-title) (not (string-empty-p raw-title)))
+                                       raw-title
+                                     filename-no-ext))
                             (rel-path (file-relative-name path grove-directory))
                             (rel-no-ext (file-name-sans-extension rel-path))
-                            (filename-no-ext (file-name-sans-extension (file-name-nondirectory path))))
-
+                            (sanitized-filename (grove--sanitize-filename filename-no-ext)))
+                       
                        (when (stringp title)
                          (puthash title t all-titles)
                          (puthash (downcase title) title resolution-map)
                          (when (stringp rel-path)
                            (puthash (downcase rel-path) title resolution-map)
                            (puthash (downcase rel-no-ext) title resolution-map)
-                           (puthash (downcase filename-no-ext) title resolution-map)))))
+                           (puthash (downcase filename-no-ext) title resolution-map)
+                           (puthash (downcase sanitized-filename) title resolution-map)))))
                    grove--cache)
-
-          (maphash (lambda (_path meta)
-                     (let ((source (plist-get meta :title))
-                           (links (plist-get meta :links)))
+          
+          ;; PASS 2: Resolve edges using alias stripping and space trimming
+          (maphash (lambda (path meta)
+                     (let* ((raw-source (plist-get meta :title))
+                            ;; FIX: Same fallback for the source node
+                            (source (if (and raw-source (stringp raw-source) (not (string-empty-p raw-source)))
+                                        raw-source
+                                      (file-name-sans-extension (file-name-nondirectory path))))
+                            (links (plist-get meta :links)))
+                       
                        (dolist (raw-target links)
                          (when (stringp raw-target)
-                           (let ((resolved-target (gethash (downcase raw-target) resolution-map)))
+                           (let* ((clean-target (string-trim (car (split-string raw-target "|"))))
+                                  (sanitized-target (grove--sanitize-filename clean-target))
+                                  (resolved-target (or (gethash (downcase clean-target) resolution-map)
+                                                       (gethash (downcase sanitized-target) resolution-map))))
+                             
                              (when (and resolved-target (gethash resolved-target all-titles))
                                (push resolved-target (gethash source adjacency))))))))
                    grove--cache)
-
+          
+          ;; PASS 3: Apply Max-Hops filtering if requested
           (let (result)
             (maphash (lambda (title _) (push (cons title (gethash title adjacency)) result)) all-titles)
             (let ((max-hops (if (numberp current-prefix-arg) current-prefix-arg grove-graph-max-distance))
                   (current-node nil))
               (when (and max-hops (buffer-file-name) (grove-file-p (buffer-file-name)))
-                (let ((meta (gethash (buffer-file-name) grove--cache)))
-                  (setq current-node (plist-get meta :title))))
+                (let* ((meta (gethash (buffer-file-name) grove--cache))
+                       (raw-node (plist-get meta :title)))
+                  ;; FIX: Same fallback for local graph centering
+                  (setq current-node (if (and raw-node (stringp raw-node) (not (string-empty-p raw-node)))
+                                         raw-node
+                                       (file-name-sans-extension (file-name-nondirectory (buffer-file-name)))))))
               (if (and max-hops current-node (gethash current-node all-titles))
                   (let ((visited (make-hash-table :test #'equal))
                         (queue (list (cons current-node 0)))
@@ -1087,6 +1125,7 @@ Returns nil."
         (advice-add 'grove-graph--adjacency-list :around #'grove-extra-around-graph-adjacency-list)
         (advice-add 'grove-graph :around #'grove-extra-around-graph)
         (advice-add 'grove-backlink--find :around #'grove-extra-around-backlink-find)
+        (advice-add 'grove-backlink--title-for-file :around #'grove-extra-around-backlink-title)
         (advice-add 'grove-backlinks :around #'grove-extra-around-backlinks)
         (advice-add 'grove-tree--list-entries :around #'grove-extra-around-tree-list-entries)
         (advice-add 'grove-tree--item-count :around #'grove-extra-around-tree-item-count)
@@ -1123,6 +1162,7 @@ Returns nil."
       (advice-remove 'grove-graph--adjacency-list #'grove-extra-around-graph-adjacency-list)
       (advice-remove 'grove-graph #'grove-extra-around-graph)
       (advice-remove 'grove-backlink--find #'grove-extra-around-backlink-find)
+      (advice-remove 'grove-backlink--title-for-file #'grove-extra-around-backlink-title)
       (advice-remove 'grove-backlinks #'grove-extra-around-backlinks)
       (advice-remove 'grove-tree--list-entries #'grove-extra-around-tree-list-entries)
       (advice-remove 'grove-tree--item-count #'grove-extra-around-tree-item-count)
