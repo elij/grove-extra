@@ -16,6 +16,9 @@ https://github.com/user-attachments/assets/6bdd8aac-201b-49d2-82eb-4d555d665437
 - Tag-based node colouring using `grove-graph-tag-groups`
 - Per note sidebar (imenu outline, tags, links and backlinks) as a speedbar display mode
 
+<img alt="speedbar-display-modes" src="https://github.com/user-attachments/assets/ea2f3b04-7702-4c6f-97da-192ddceaf2bb" />
+
+
 ## Quick start
 
 ```elisp
