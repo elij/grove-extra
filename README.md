@@ -7,15 +7,16 @@ It requires [graph-fa2](https://github.com/elij/graph-fa2) to render the force d
 https://github.com/user-attachments/assets/6bdd8aac-201b-49d2-82eb-4d555d665437
 
 ## Features
-- Date format localisation
-- Work with other noting schemas in grove (md+frontmatter, denote, org)
-- Grove tree emulated using speedbar
-- Further raph rendering options
-  -  Additional graph engines ([mmdr](https://github.com/1jehuang/mermaid-rs-renderer) and no runtime force directed graph [graph-fa2](https://github.com/elij/graph-fa2))
-  - Local graph rendering with `grove-extra-graph-max-distance`
-  - Node tag colours with `graph-graph-tag-groups`
 
-## Quick Start
+- Date format localisation
+- Integration with other note formats (Markdown with YAML frontmatter, Denote, Org)
+- Speedbar integration for browsing the file tree
+- Extended graph rendering engines (Mermaid via `mmdr` and animated physics via `graph-fa2`)
+- Localised graph view centered on active buffer using `grove-graph-max-distance`
+- Tag-based node colouring using `grove-graph-tag-groups`
+- Per note sidebar (imenu outline, tags, links and backlinks) as a speedbar display mode
+
+## Quick start
 
 ```elisp
 (use-package graph-fa2)
@@ -42,3 +43,10 @@ https://github.com/user-attachments/assets/6bdd8aac-201b-49d2-82eb-4d555d665437
   (global-grove-mode 1)
   (grove-extra-mode 1))
 ```
+
+## Keymaps and hooks
+
+- `grove-extra-graph-mode`: Minor mode for interactive graph buffer features and hover hooks.
+- `grove-extra-capture-mode`: Minor mode for capture buffer setup, preserving keymaps by running after major mode initialisation.
+- `grove-extra-node-hover-functions`: Hook executed when hovering over nodes in graph views.
+

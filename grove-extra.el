@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.5.10
+;; Version: 0.5.11
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -116,6 +116,14 @@ Functions should accept one argument: the NODE-ID string, or nil if empty space.
 
 (defvar grove-speedbar-menu nil
   "Menu for Grove Speedbar mode.")
+
+(defun grove-speedbar ()
+  "Open Speedbar and switch to the Grove display mode."
+  (interactive)
+  (if (fboundp 'speedbar-window-mode)
+      (speedbar-window-mode 1)
+    (speedbar-frame-mode 1))
+  (speedbar-change-initial-expansion-list "Grove"))
 
 (defun grove-extra--tab-line-buffers ()
   "Return a list of grove note buffers for the tab-line, excluding sidebars."
@@ -1019,6 +1027,7 @@ structures and start the engine."
 (defun grove-speedbar-buttons (_directory _depth)
   "Main entry point for drawing the Grove file tree in the speedbar."
   (erase-buffer)
+  (setq-local header-line-format nil)
   (grove--ensure-directory)
   (insert (propertize " Grove\n" 'face 'bold))
   (grove-speedbar-insert-dir grove-directory 0))
@@ -1035,8 +1044,277 @@ structures and start the engine."
   (dframe-with-attached-buffer
    (find-file token)))
 
+(defun grove-speedbar-overview-expanded-p (key default-expanded)
+  "Return non-nil if overview section KEY is expanded."
+  (let ((val (gethash key grove-speedbar-expanded)))
+    (if (null val)
+        default-expanded
+      (eq val 'expanded))))
+
+(defun grove-speedbar-toggle-overview-folder (_text token _indent)
+  "Toggle the expansion state of overview section folder TOKEN (KEY . DEFAULT)."
+  (let* ((key (car token))
+         (default-expanded (cdr token))
+         (is-expanded (grove-speedbar-overview-expanded-p key default-expanded)))
+    (puthash key (if is-expanded 'collapsed 'expanded) grove-speedbar-expanded)
+    (speedbar-update-contents)))
+
+(defun grove-speedbar--active-buffer ()
+  "Return the active note buffer from the attached frame or main window."
+  (let* ((win (or (grove-tree--main-window)
+                  (and (fboundp 'speedbar-attached-frame)
+                       (frame-live-p (speedbar-attached-frame))
+                       (get-mru-window (speedbar-attached-frame) nil t))
+                  (next-window)))
+         (buf (and win (window-buffer win))))
+    (if (and buf (buffer-file-name buf) (grove-file-p (buffer-file-name buf)))
+        buf
+      (car (cl-remove-if-not
+            (lambda (b)
+              (and (buffer-file-name b)
+                   (grove-file-p (buffer-file-name b))))
+            (buffer-list))))))
+
+(defun grove-speedbar--get-buffer-headings (buf)
+  "Return a list of heading plists for BUF."
+  (when (and buf (buffer-live-p buf))
+    (with-current-buffer buf
+      (let (headings)
+        (save-excursion
+          (goto-char (point-min))
+          (while (re-search-forward "^\\(\\*+\\|#+\\)\\s-+\\(.*\\)$" nil t)
+            (let ((level (length (match-string 1)))
+                  (text (string-trim (match-string 2)))
+                  (pos (match-beginning 0)))
+              (push (list :level level :text text :pos pos) headings))))
+        (nreverse headings)))))
+
+(defun grove-speedbar-goto-outline (_text token _indent)
+  "Jump to outline position TOKEN (BUF . POS)."
+  (let ((buf (car token))
+        (pos (cdr token)))
+    (when (and buf (buffer-live-p buf))
+      (dframe-with-attached-buffer
+       (switch-to-buffer buf)
+       (goto-char pos)
+       (recenter)))))
+
+(defun grove-speedbar--render-outline-items (buf count-only)
+  "Render outline items for BUF, or return item count if COUNT-ONLY is non-nil."
+  (let ((headings (grove-speedbar--get-buffer-headings buf)))
+    (if count-only
+        (length headings)
+      (if (null headings)
+          (insert "  (no outline)\n")
+        (let ((use-icons (and (boundp 'grove-tree-icons) grove-tree-icons)))
+          (dolist (h headings)
+            (let* ((lvl (plist-get h :level))
+                   (txt (plist-get h :text))
+                   (pos (plist-get h :pos))
+                   (indent (make-string (+ 2 (* (max 0 (1- lvl)) 2)) ?\s))
+                   (start (point)))
+              (insert "1:")
+              (put-text-property start (point) 'invisible t)
+              (insert indent)
+              (let* ((icon-start (point))
+                     (icon-str (if use-icons "  \xe612" " ? "))
+                     (icon-end (progn (insert icon-str) (point))))
+                (speedbar-make-button icon-start icon-end 'speedbar-file-face 'highlight
+                                      #'grove-speedbar-goto-outline (cons buf pos)))
+              (insert " ")
+              (let* ((lbl-start (point))
+                     (lbl-end (progn (insert txt) (point))))
+                (speedbar-make-button lbl-start lbl-end 'speedbar-file-face 'highlight
+                                      #'grove-speedbar-goto-outline (cons buf pos)))
+              (insert "\n"))))))))
+
+(defun grove-speedbar--get-tags (buf)
+  "Return list of tags for BUF or all vault tags if BUF has none."
+  (let* ((file (and buf (buffer-file-name buf)))
+         (meta (and file (gethash file grove--cache)))
+         (note-tags (and meta (plist-get meta :tags))))
+    (if note-tags
+        note-tags
+      (let (all-tags)
+        (maphash (lambda (_path m)
+                   (dolist (tag (plist-get m :tags))
+                     (cl-pushnew tag all-tags :test #'string=)))
+                 grove--cache)
+        (sort all-tags #'string<)))))
+
+(defun grove-speedbar-click-tag (_text token _indent)
+  "Search for tag TOKEN."
+  (grove-search-tag token))
+
+(defun grove-speedbar--render-tag-items (buf count-only)
+  "Render tag items for BUF, or return item count if COUNT-ONLY is non-nil."
+  (let ((tags (grove-speedbar--get-tags buf)))
+    (if count-only
+        (length tags)
+      (if (null tags)
+          (insert "  (no tags)\n")
+        (let ((use-icons (and (boundp 'grove-tree-icons) grove-tree-icons)))
+          (dolist (tag tags)
+            (let ((start (point)))
+              (insert "1:")
+              (put-text-property start (point) 'invisible t)
+              (insert "  ")
+              (let* ((icon-start (point))
+                     (icon-str (if use-icons "  \xe612" " ? "))
+                     (icon-end (progn (insert icon-str) (point))))
+                (speedbar-make-button icon-start icon-end 'speedbar-file-face 'highlight
+                                      #'grove-speedbar-click-tag tag))
+              (insert " ")
+              (let* ((lbl-start (point))
+                     (lbl-end (progn (insert (concat "#" tag)) (point))))
+                (speedbar-make-button lbl-start lbl-end 'speedbar-file-face 'highlight
+                                      #'grove-speedbar-click-tag tag))
+              (insert "\n"))))))))
+
+(defun grove-speedbar-click-link (_text token _indent)
+  "Follow link TOKEN."
+  (grove-link-follow token))
+
+(defun grove-speedbar--render-link-items (buf count-only)
+  "Render link items for BUF, or return item count if COUNT-ONLY is non-nil."
+  (let* ((file (and buf (buffer-file-name buf)))
+         (meta (and file (gethash file grove--cache)))
+         (links (and meta (plist-get meta :links))))
+    (if count-only
+        (length links)
+      (if (null links)
+          (insert "  (no links)\n")
+        (let ((use-icons (and (boundp 'grove-tree-icons) grove-tree-icons)))
+          (dolist (link links)
+            (let ((start (point)))
+              (insert "1:")
+              (put-text-property start (point) 'invisible t)
+              (insert "  ")
+              (let* ((icon-start (point))
+                     (icon-str (if use-icons "  \xe612" " ? "))
+                     (icon-end (progn (insert icon-str) (point))))
+                (speedbar-make-button icon-start icon-end 'speedbar-file-face 'highlight
+                                      #'grove-speedbar-click-link link))
+              (insert " ")
+              (let* ((lbl-start (point))
+                     (lbl-end (progn (insert link) (point))))
+                (speedbar-make-button lbl-start lbl-end 'speedbar-file-face 'highlight
+                                      #'grove-speedbar-click-link link))
+              (insert "\n"))))))))
+
+(defun grove-speedbar-click-backlink (_text token _indent)
+  "Open backlink file specified by TOKEN plist."
+  (let ((file (plist-get token :file))
+        (line (plist-get token :line)))
+    (when file
+      (dframe-with-attached-buffer
+       (find-file file)
+       (when line
+         (goto-char (point-min))
+         (forward-line (1- line)))))))
+
+(defun grove-speedbar--render-backlink-items (buf count-only)
+  "Render backlink items for BUF, or return item count if COUNT-ONLY is non-nil."
+  (let* ((file (and buf (buffer-file-name buf)))
+         (meta (and file (gethash file grove--cache)))
+         (filename (and file (file-name-sans-extension (file-name-nondirectory file))))
+         (title (or (and meta (plist-get meta :title)) filename))
+         (results (when (and file title) (grove-backlink--find title filename))))
+    (if count-only
+        (length results)
+      (if (null results)
+          (insert "  (no backlinks)\n")
+        (let ((use-icons (and (boundp 'grove-tree-icons) grove-tree-icons)))
+          (dolist (res results)
+            (let* ((res-file (plist-get res :file))
+                   (res-line (plist-get res :line))
+                   (res-title (if (fboundp 'grove-backlink--title-for-file)
+                                  (grove-backlink--title-for-file res-file)
+                                (file-name-sans-extension (file-name-nondirectory res-file))))
+                   (lbl-text (format "%s:%d" res-title res-line))
+                   (start (point)))
+              (insert "1:")
+              (put-text-property start (point) 'invisible t)
+              (insert "  ")
+              (let* ((icon-start (point))
+                     (icon-str (if use-icons "  \xe612" " ? "))
+                     (icon-end (progn (insert icon-str) (point))))
+                (speedbar-make-button icon-start icon-end 'speedbar-file-face 'highlight
+                                      #'grove-speedbar-click-backlink res))
+              (insert " ")
+              (let* ((lbl-start (point))
+                     (lbl-end (progn (insert lbl-text) (point))))
+                (speedbar-make-button lbl-start lbl-end 'speedbar-file-face 'highlight
+                                      #'grove-speedbar-click-backlink res))
+              (insert "\n"))))))))
+
+(defun grove-speedbar-insert-overview-folder (key label items-fn default-expanded)
+  "Insert an overview section folder with KEY, LABEL, ITEMS-FN, and DEFAULT-EXPANDED."
+  (let* ((expanded (grove-speedbar-overview-expanded-p key default-expanded))
+         (use-icons (and (boundp 'grove-tree-icons) grove-tree-icons))
+         (count (and items-fn (funcall items-fn t)))
+         (start (point)))
+    (insert "0:")
+    (put-text-property start (point) 'invisible t)
+
+    (let* ((icon-start (point))
+           (icon-str (if expanded
+                         (if use-icons "▾ \xf115" "[-]")
+                       (if use-icons "▸ \xf114" "[+]")))
+           (icon-end (progn (insert icon-str) (point))))
+      (speedbar-make-button icon-start icon-end
+                            'speedbar-button-face
+                            'highlight
+                            #'grove-speedbar-toggle-overview-folder
+                            (cons key default-expanded)))
+    (insert " ")
+
+    (let* ((label-start (point))
+           (display-label (if (numberp count) (format "%s (%d)" label count) label))
+           (label-end (progn (insert display-label) (point))))
+      (speedbar-make-button label-start label-end
+                            'speedbar-directory-face
+                            'highlight
+                            #'grove-speedbar-toggle-overview-folder
+                            (cons key default-expanded)))
+    (insert "\n")
+
+    (when expanded
+      (if items-fn
+          (funcall items-fn nil)
+        (insert "  (empty)\n")))))
+
+(defun grove-speedbar-overview-buttons (_directory _depth)
+  "Main entry point for drawing Grove Overview display mode in speedbar."
+  (erase-buffer)
+  (setq-local header-line-format nil)
+  (grove--ensure-directory)
+  (insert (propertize " Grove Overview\n" 'face 'bold))
+  (let ((buf (grove-speedbar--active-buffer)))
+    (grove-speedbar-insert-overview-folder
+     "overview:Outline" "Outline"
+     (lambda (count-only) (grove-speedbar--render-outline-items buf count-only))
+     t)
+    (grove-speedbar-insert-overview-folder
+     "overview:Tags" "Tags"
+     (lambda (count-only) (grove-speedbar--render-tag-items buf count-only))
+     nil)
+    (grove-speedbar-insert-overview-folder
+     "overview:Links" "Links"
+     (lambda (count-only) (grove-speedbar--render-link-items buf count-only))
+     t)
+    (grove-speedbar-insert-overview-folder
+     "overview:Backlinks" "Backlinks"
+     (lambda (count-only) (grove-speedbar--render-backlink-items buf count-only))
+     nil)))
+
 (with-eval-after-load 'speedbar
-  (speedbar-add-expansion-list '("Grove" grove-speedbar-menu grove-speedbar-key-map grove-speedbar-buttons)))
+  (setq speedbar-initial-expansion-mode-alist
+        (assoc-delete-all "Grove" speedbar-initial-expansion-mode-alist))
+  (setq speedbar-initial-expansion-mode-alist
+        (assoc-delete-all "Grove Overview" speedbar-initial-expansion-mode-alist))
+  (speedbar-add-expansion-list '("Grove" grove-speedbar-menu grove-speedbar-key-map grove-speedbar-buttons))
+  (speedbar-add-expansion-list '("Grove Overview" grove-speedbar-menu grove-speedbar-key-map grove-speedbar-overview-buttons)))
 
 (defun grove-extra-around-set-current-file (orig-fun file)
   "Redirect the native tree highlight request to Speedbar.
