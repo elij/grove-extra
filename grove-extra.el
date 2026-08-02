@@ -1,4 +1,4 @@
-;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
+;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
 ;; Version: 0.5.12
@@ -7,6 +7,7 @@
 
 (require 'calendar)
 (require 'dframe)
+(require 'imenu)
 (require 'grove)
 (require 'grove-core)
 (require 'grove-graph)
@@ -1071,19 +1072,52 @@ structures and start the engine."
                    (grove-file-p (buffer-file-name b))))
             (buffer-list))))))
 
+(defun grove-extra--flatten-imenu (index-alist &optional level)
+  "Flatten an imenu INDEX-ALIST into a list of plists for Speedbar.
+LEVEL tracks the depth for Speedbar indentation."
+  (let ((lvl (or level 1))
+        res)
+    (dolist (item index-alist)
+      (when (consp item)
+        (let ((name (car item))
+              (target (cdr item)))
+          (unless (member name '("*Rescan*" "*Map*"))
+            (cond
+             
+             ((or (integerp target) (markerp target))
+              (push (list :level lvl :text name
+                          :pos (if (markerp target) (marker-position target) target))
+                    res))
+             
+             ((and (consp target) (or (integerp (car target)) (markerp (car target))))
+              (push (list :level lvl :text name
+                          :pos (if (markerp (car target)) 
+                                   (marker-position (car target)) 
+                                 (car target)))
+                    res))
+             
+             ((consp target)
+
+              (let ((self-ref (assoc name target)))
+                (when self-ref
+                  (push (list :level lvl :text name
+                              :pos (let ((p (cdr self-ref)))
+                                     (if (markerp p) (marker-position p) p)))
+                        res)
+                  (setq target (delete self-ref target))))
+              
+              (setq res
+                    (nconc (nreverse (grove-extra--flatten-imenu target (1+ lvl))) res))))))))
+    (nreverse res)))
+
 (defun grove-speedbar--get-buffer-headings (buf)
-  "Return a list of heading plists for BUF."
+  "Return a list of heading plists for BUF using native imenu."
   (when (and buf (buffer-live-p buf))
     (with-current-buffer buf
-      (let (headings)
-        (save-excursion
-          (goto-char (point-min))
-          (while (re-search-forward "^\\(\\*+\\|#+\\)\\s-+\\(.*\\)$" nil t)
-            (let ((level (length (match-string 1)))
-                  (text (string-trim (match-string 2)))
-                  (pos (match-beginning 0)))
-              (push (list :level level :text text :pos pos) headings))))
-        (nreverse headings)))))
+      (save-restriction
+        (widen)
+        (let ((index-alist (imenu--make-index-alist)))
+          (grove-extra--flatten-imenu index-alist))))))
 
 (defun grove-speedbar-goto-outline (_text token _indent)
   "Jump to outline position TOKEN (BUF . POS)."
