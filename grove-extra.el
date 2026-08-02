@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.5.11
+;; Version: 0.5.12
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -182,6 +182,7 @@ Returns nil."
              (buffer-file-name)
              (grove-file-p (buffer-file-name)))
     (grove-mode 1)
+    (add-hook 'completion-at-point-functions #'grove-extra-link-capf nil t)
     (when grove-extra-use-tab-line
       (setq-local tab-line-tabs-function #'grove-extra--tab-line-buffers)
       (tab-line-mode 1))))
@@ -439,32 +440,27 @@ Returns nil."
             (message "Link not followed"))))
     (funcall orig-fun title)))
 
+(defun grove-extra-link-capf ()
+  "Provide completion for Obsidian-style Grove links.
+Triggers on `[[' and pulls candidates directly from the Grove cache."
+  (when (looking-back "\\[\\[\\([^]]*\\)" (line-beginning-position))
+    (let ((start (match-beginning 1))
+          (end (point)))
+      (let ((titles (mapcar #'car (grove--note-titles))))
+        (list start end titles
+              :exclusive 'no
+              :annotation-function (lambda (_) " Grove Note")
+              :exit-function (lambda (_string status)
+                               (when (eq status 'finished)
+                                 (unless (looking-at-p "\\]\\]")
+                                   (insert "]]")))))))))
+
 (defun grove-extra-around-link-insert (orig-fun)
+  "Unify link insertion to use [[ ]] and trigger completion-at-point."
   (if grove-extra-mode
-      (cond
-       ((and (fboundp 'denote-link)
-             (buffer-file-name)
-             (string-prefix-p (expand-file-name (denote-directory))
-                              (expand-file-name (buffer-file-name))))
-        (call-interactively #'denote-link))
-
-       ((derived-mode-p 'markdown-mode)
-        (grove--refresh-cache)
-        (let* ((titles (grove--note-titles))
-               (completing-read-function
-                (lambda (prompt _collection &rest _args)
-                  (completing-read prompt (mapcar #'car titles) nil nil))))
-          (if (fboundp 'markdown-insert-wiki-link)
-              (call-interactively #'markdown-insert-wiki-link)
-            (call-interactively #'markdown-insert-link))))
-
-       (t
-        (grove--refresh-cache)
-        (let* ((titles (grove--note-titles))
-               (completing-read-function
-                (lambda (prompt _collection &rest _args)
-                  (completing-read prompt (mapcar #'car titles) nil nil))))
-          (call-interactively #'org-insert-link))))
+      (progn
+        (insert "[[")
+        (completion-at-point))
     (funcall orig-fun)))
 
 (defun grove-extra-around-link-resolve (orig-fun title)
