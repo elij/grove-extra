@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.5.13
+;; Version: 0.5.16
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -324,8 +324,16 @@ Returns nil."
     (define-key map (kbd "RET") #'grove-extra-inbox-visit-note)
     (define-key map (kbd "f") #'grove-extra-inbox-visit-note)
     (define-key map (kbd "v") #'grove-extra-inbox-visit-note)
+    (define-key map [mouse-1] #'grove-extra-inbox-visit-note-mouse)
+    (define-key map [mouse-2] #'grove-extra-inbox-visit-note-mouse)
     map)
   "Keymap for `grove-extra-inbox-mode'.")
+
+(defun grove-extra-inbox-visit-note-mouse (event)
+  "Visit the inbox note clicked with the mouse."
+  (interactive "e")
+  (mouse-set-point event)
+  (grove-extra-inbox-visit-note))
 
 (define-derived-mode grove-extra-inbox-mode tabulated-list-mode "Grove Inbox"
   "Major mode for reviewing notes in the Grove inbox."
@@ -375,7 +383,7 @@ ARGS: Additional arguments passed to ORIG-FUN."
                     (when (member item unlinked)
                       (push "unlinked" issues))
                     (let ((issues-str (string-join (nreverse issues) ", ")))
-                      (push (list file (vector title date-str issues-str)) entries))))))
+                      (push (list file (vector (list title 'face 'link) date-str issues-str)) entries))))))
             (setq tabulated-list-entries (nreverse entries))
             (tabulated-list-print t))
           (pop-to-buffer buf)))
@@ -663,6 +671,51 @@ is disabled, defers entirely to ORIG-FUN."
             (expand-file-name choice grove-directory)))
       nil)))
 
+;;; Tag CAPF backend:
+
+(defun grove-extra--all-vault-tags ()
+  "Collect a deduplicated list of all tags currently in `grove--cache`."
+  (grove--ensure-directory)
+  (grove--refresh-cache)
+  (let (all-tags)
+    (maphash (lambda (_path meta)
+               (when-let ((tags (plist-get meta :tags)))
+                 (setq all-tags (append tags all-tags))))
+             grove--cache)
+    (delete-dups all-tags)))
+
+(defun grove-extra-tag-completion-at-point ()
+  "CAPF backend for completing Grove tags at point in Org and Markdown buffers."
+  (when (and grove-extra-mode (grove-file-p (buffer-file-name)))
+    (save-excursion
+      (let ((p (point)))
+        (cond
+         ((and (derived-mode-p 'org-mode)
+               (save-excursion (forward-line 0) (looking-at-p "^#\\+filetags:"))
+               (re-search-backward ":\\([a-zA-Z0-9_@-]*\\)" (line-beginning-position) t))
+          (let ((beg (match-beginning 1))
+                (end p))
+            (list beg end (grove-extra--all-vault-tags)
+                  :exclusive 'no
+                  :annotation-function (lambda (_) " (Grove tag)"))))
+
+         ((re-search-backward "#\\([a-zA-Z0-9_@-]*\\)" (line-beginning-position) t)
+          (unless (save-excursion 
+                    (goto-char (match-beginning 0))
+                    (looking-at-p "^#+\\s-"))
+            (let ((beg (match-beginning 1))
+                  (end p))
+              (list beg end (grove-extra--all-vault-tags)
+                    :exclusive 'no
+                    :annotation-function (lambda (_) " (Grove tag)"))))))))))
+
+
+(defun grove-extra--setup-capf ()
+  "Add Grove tag completion to `completion-at-point-functions`."
+  (when grove-extra-mode
+    (add-hook 'completion-at-point-functions 
+              #'grove-extra-tag-completion-at-point nil t)))
+
 (defun grove-extra-around-capture (orig-fun)
   (if grove-extra-mode
       (progn
@@ -764,62 +817,85 @@ Returns the newly opened buffer or nil."
     (funcall orig-fun)))
 
 (defun grove-extra-around-backlink-find (orig-fun &rest args)
-  "Advise backlink finding to safely handle nil titles, extensions, and aliases."
-  (if grove-extra-mode
-      (progn
-        (grove--ensure-directory)
-        (unless (executable-find grove-backlink-ripgrep-executable)
-          (user-error "Ripgrep not found. Install `%s` and ensure it is on your PATH"
-                      grove-backlink-ripgrep-executable))
-        
-        (let* ((title (nth 0 args))
-               (filename (nth 1 args))
-               (safe-title (if (stringp title) title (or filename ""))))
-          
-          (unless filename
-            (maphash (lambda (path meta)
-                       (let ((meta-title (plist-get meta :title)))
-                         (when (and meta-title 
-                                    (stringp meta-title) 
-                                    (string-equal-ignore-case meta-title safe-title))
-                           (setq filename (file-name-sans-extension (file-name-nondirectory path))))))
-                     grove--cache))
-          (unless filename (setq filename safe-title))
+  "Advise backlink finding using a broad ripgrep pass and strict Emacs regex verification."
+  (if (not grove-extra-mode)
+      (apply orig-fun args)
+    (grove--ensure-directory)
+    (unless (executable-find grove-backlink-ripgrep-executable)
+      (user-error "Ripgrep not found. Install `%s` and ensure it is on your PATH"
+                  grove-backlink-ripgrep-executable))
 
-          (let* ((title-pat (regexp-quote safe-title))
-                 (file-pat (regexp-quote filename))
-                 
-                 (rg-suffix "(?:\\.[a-zA-Z0-9]+)?(?:\\|[^]]*)?\\]\\]")
-                 
-                 (pattern (if (string= title-pat file-pat)
-                              (format "\\[\\[(?:[^]]*/)?%s%s" title-pat rg-suffix)
-                            (format "\\[\\[(?:[^]]*/)?(?:%s|%s)%s" title-pat file-pat rg-suffix)))
-                 (valid-exts (if (listp grove-file-extensions) grove-file-extensions (list grove-file-extensions)))
-                 (globs (mapcar (lambda (ext) (format "--glob=*.%s" ext)) valid-exts))
-                 (rg-args (append (list "--no-heading" "--line-number" "--context" "1")
-                                  globs (list pattern grove-directory)))
-                 (ext-re (mapconcat #'grove-extra--make-ci-regexp valid-exts "\\|"))
-                 (current-file (buffer-file-name))
-                 results)
+    (let* ((title (nth 0 args))
+           (filename (nth 1 args))
+           (safe-title (if (stringp title) title (or filename ""))))
 
-            (with-temp-buffer
-              (let* ((default-directory grove-directory)
-                     (exit-code (apply #'process-file grove-backlink-ripgrep-executable nil t nil rg-args)))
-                (unless (member exit-code '(0 1 2))
-                  (user-error "Ripgrep failed with exit code %s" exit-code)))
-              
-              (goto-char (point-min))
-              (dolist (line (split-string (buffer-string) "\n" t))
-                (cond
-                 ((string-match-p "^--$" line))
-                 ((string-match (format "^\\(.+\\.\\(?:%s\\)\\):\\([0-9]+\\):\\(.*\\)$" ext-re) line)
-                  (let ((file (expand-file-name (match-string 1 line) grove-directory))
-                        (lnum (string-to-number (match-string 2 line)))
-                        (context (string-trim (match-string 3 line))))
-                    (unless (and current-file (string= file current-file))
-                      (push (list :file file :line lnum :context context) results)))))))
-            (cl-remove-if (lambda (r) (and current-file (string= (plist-get r :file) current-file))) (nreverse results)))))
-    (apply orig-fun args)))
+      (unless filename
+        (maphash (lambda (path meta)
+                   (let ((meta-title (plist-get meta :title)))
+                     (when (and meta-title 
+                                (stringp meta-title) 
+                                (string-equal-ignore-case meta-title safe-title))
+                       (setq filename (file-name-sans-extension (file-name-nondirectory path))))))
+                 grove--cache))
+      (unless filename (setq filename safe-title))
+
+      (let* ((title-pat (regexp-quote safe-title))
+             (file-pat (regexp-quote filename))
+             
+             (pattern (if (string= title-pat file-pat)
+                          (format "\\[\\[.*%s" title-pat)
+                        (format "\\[\\[.*(?:%s|%s)" title-pat file-pat)))
+             
+             (valid-exts (if (listp grove-file-extensions) grove-file-extensions (list grove-file-extensions)))
+             (globs (mapcar (lambda (ext) (format "--glob=*.%s" ext)) valid-exts))
+             (rg-args (append (list "--no-heading" "--line-number" "--context" "1")
+                              globs (list pattern grove-directory)))
+             (ext-re (mapconcat #'grove-extra--make-ci-regexp valid-exts "\\|"))
+             (current-file (buffer-file-name))
+             results)
+
+        (with-temp-buffer
+          (let* ((default-directory grove-directory)
+                 (exit-code (apply #'process-file grove-backlink-ripgrep-executable nil t nil rg-args)))
+            (unless (member exit-code '(0 1 2))
+              (user-error "Ripgrep failed with exit code %s" exit-code)))
+
+          (goto-char (point-min))
+          (dolist (line (split-string (buffer-string) "\n" t))
+            (cond
+             ((string-match-p "^--$" line))
+             ((string-match (format "^\\(.+\\.\\(?:%s\\)\\):\\([0-9]+\\):\\(.*\\)$" ext-re) line)
+              (let ((file (expand-file-name (match-string 1 line) grove-directory))
+                    (lnum (string-to-number (match-string 2 line)))
+                    (context (string-trim (match-string 3 line))))
+
+                (unless (and current-file (string= file current-file))
+                  
+                  (with-temp-buffer
+                    (insert context)
+                    (goto-char (point-min))
+                    
+                    (while (re-search-forward grove-link--regexp nil t)
+                      (let* ((target (match-string-no-properties 1))
+                             (clean-target (string-trim (car (split-string target "|"))))
+                             (target-file-part (file-name-nondirectory clean-target))
+                             (target-no-ext (file-name-sans-extension target-file-part))
+                             (sanitised-target (grove--sanitize-filename target-no-ext))
+                             (sanitised-clean (grove--sanitize-filename clean-target)))
+                        
+                        (when (or (string-equal-ignore-case clean-target safe-title)
+                                  (string-equal-ignore-case clean-target filename)
+                                  (string-equal-ignore-case target-no-ext safe-title)
+                                  (string-equal-ignore-case target-no-ext filename)
+                                  (string-equal-ignore-case sanitised-target safe-title)
+                                  (string-equal-ignore-case sanitised-target filename)
+                                  (string-equal-ignore-case sanitised-clean safe-title))
+                          (push (list :file file 
+                                      :line lnum 
+                                      :column (1- (match-beginning 0)) 
+                                      :context context) 
+                                results)))))))))))
+        (cl-remove-if (lambda (r) (and current-file (string= (plist-get r :file) current-file))) (nreverse results))))))
 
 (defun grove-extra-around-backlink-title (orig-fun file)
   "Safely retrieve the title for a file, falling back to the filename if nil."
@@ -1579,6 +1655,7 @@ Returns nil."
         (add-hook 'grove-capture-mode-hook #'grove-extra--enable-capture-mode)
         (add-hook 'find-file-hook #'grove-extra--turn-on-hook)
         (add-hook 'project-find-functions #'grove-extra-project-backend)
+        (add-hook 'find-file-hook #'grove-extra--setup-capf)
 
         (advice-add 'grove--parse-note :around #'grove-extra-around-parse-note)
         (advice-add 'grove--refresh-cache :around #'grove-extra-around-refresh-cache)
@@ -1618,6 +1695,7 @@ Returns nil."
       (remove-hook 'grove-graph-mode-hook #'grove-extra--enable-graph-mode)
       (remove-hook 'grove-capture-mode-hook #'grove-extra--enable-capture-mode)
       (remove-hook 'find-file-hook #'grove-extra--turn-on-hook)
+      (remove-hook 'find-file-hook #'grove-extra--setup-capf)
 
       (advice-remove 'grove--parse-note #'grove-extra-around-parse-note)
       (advice-remove 'grove--refresh-cache #'grove-extra-around-refresh-cache)
