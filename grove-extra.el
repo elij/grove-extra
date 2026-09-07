@@ -1,7 +1,7 @@
 ;;; grove-extra.el --- Unofficial extensions for Grove -*- lexical-binding: t -*-
 
 ;; Author: Elijah Charles
-;; Version: 0.5.16
+;; Version: 0.5.17
 ;; Package-Requires: ((emacs "29.1") (grove "0.1.0"))
 ;; Description: Adds Markdown support, ForceAtlas2, Mermaid, and SVG scaling to Grove.
 
@@ -461,18 +461,18 @@ ARGS: Additional arguments passed to ORIG-FUN."
 
               (when (fboundp 'org-element-parse-buffer)
                 (org-element-map (org-element-parse-buffer) 'link
-                                 (lambda (link)
-                                   (let ((type (org-element-property :type link))
-                                         (path (org-element-property :path link)))
-                                     (cond
-                                      ((member type '("fuzzy" "file"))
-                                       (push path links))
+                  (lambda (link)
+                    (let ((type (org-element-property :type link))
+                          (path (org-element-property :path link)))
+                      (cond
+                       ((member type '("fuzzy" "file"))
+                        (push path links))
 
-                                      ((and (string= type "denote") (fboundp 'denote-get-path-by-id))
-                                       (let* ((file-path (denote-get-path-by-id path))
-                                              (denote-title (when file-path
-                                                              (denote-retrieve-title-value file-path 'org))))
-                                         (push (or denote-title path) links))))))))
+                       ((and (string= type "denote") (fboundp 'denote-get-path-by-id))
+                        (let* ((file-path (denote-get-path-by-id path))
+                               (denote-title (when file-path
+                                               (denote-retrieve-title-value file-path 'org))))
+                          (push (or denote-title path) links))))))))
 
               (unless title
                 (setq title (file-name-sans-extension (file-name-nondirectory file))))
@@ -1073,8 +1073,11 @@ ORIG-FUN: The original `grove-backlinks` function."
                (let* ((meta (gethash title title-to-meta))
                       (tags (when meta (plist-get meta :tags)))
                       (colour (grove-extra--get-node-colour tags))
+                      (min-radius 10.0)
+                      (max-radius (* 2.0 min-radius))
                       (bl-count (gethash title backlink-counts 0))
-                      (radius (+ 10.0 (* 2.0 bl-count))))
+                      (calculated-radius (+ min-radius (* 2.0 bl-count)))
+                      (radius (min calculated-radius max-radius)))
                  (push (list :id title :colour colour :radius radius :label title) nodes)))
              unique-titles)
     (list :nodes (nreverse nodes) :edges (nreverse edges))))
